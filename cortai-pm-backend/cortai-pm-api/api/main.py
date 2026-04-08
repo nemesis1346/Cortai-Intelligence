@@ -16,6 +16,9 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 import asyncpg
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from api.schema import SCHEMA
 from buildium.sync_engine import SyncEngine, run_sync_scheduler
