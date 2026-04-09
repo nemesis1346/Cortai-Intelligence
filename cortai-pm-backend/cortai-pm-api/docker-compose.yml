@@ -2,6 +2,19 @@ version: "3.9"
 
 services:
 
+  nginx:
+    image: nginx:alpine
+    container_name: cortai-pm-nginx
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ../../cortai-pm.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+
   db:
     image: postgres:16-alpine
     container_name: cortai-pm-db
@@ -37,11 +50,11 @@ services:
       - ./api:/app/api
       - ./buildium:/app/buildium
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
 volumes:
   cortai-pm-data:

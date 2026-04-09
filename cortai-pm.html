@@ -256,7 +256,7 @@ svg{display:block;flex-shrink:0}
 /* ── Toast ─────────────────────────────────────────────────────── */
 @keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
 </style>
-<script>window.API_BASE='http://localhost:3001';</script>
+<script>window.API_BASE='';</script>
 </head>
 <body>
 
@@ -598,7 +598,7 @@ svg{display:block;flex-shrink:0}
 <main class="main" id="content-area"></main>
 
 <script>
-const API_BASE = window.API_BASE || '/';
+const API_BASE = typeof window.API_BASE === 'string' ? window.API_BASE : '';
 async function api(path, opts={}){ const res = await fetch(`${API_BASE}${path}`, { headers:{'Content-Type':'application/json'}, ...opts }); if(!res.ok) throw new Error(`${res.status}`); return res.json(); }
 let HEALTH = null, API_PROPS = null, API_WOS = null, API_TENANTS = null, API_LEASES_EXP = null, API_INSP = null, API_VENDORS = null, _bootstrapped = false;
 let DASH = null; let _dashLoading = false; let _lastScreen = null;
