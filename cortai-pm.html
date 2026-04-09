@@ -256,6 +256,7 @@ svg{display:block;flex-shrink:0}
 /* ── Toast ─────────────────────────────────────────────────────── */
 @keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
 </style>
+<script>window.API_BASE='http://localhost:3001';</script>
 </head>
 <body>
 
@@ -267,13 +268,13 @@ svg{display:block;flex-shrink:0}
     </svg>
     <div>
       <div class="brand">COrtai Property Intelligence</div>
-      <div class="sub">Lionston Group · 54 Properties · 325 Units</div>
+      <div class="sub" id="topbar-subtitle">Lionston Group · — Properties · — Units</div>
     </div>
   </div>
   <div id="topbar-title" class="topbar-title">Portfolio Overview</div>
   <div class="topbar-meta">
-    <div class="buildium-badge" onclick="switchSection('buildium')">
-      <div class="dot"></div>Buildium Live · Synced 4m ago
+    <div class="buildium-badge" id="topbar-buildium" onclick="switchSection('buildium')">
+      <div class="dot"></div><span id="topbar-buildium-text">Buildium · connecting…</span>
     </div>
     <div class="topbar-time" id="topbar-clock">—</div>
     <div class="alert-bell">
@@ -597,6 +598,75 @@ svg{display:block;flex-shrink:0}
 <main class="main" id="content-area"></main>
 
 <script>
+const API_BASE = window.API_BASE || '/';
+async function api(path, opts={}){ const res = await fetch(`${API_BASE}${path}`, { headers:{'Content-Type':'application/json'}, ...opts }); if(!res.ok) throw new Error(`${res.status}`); return res.json(); }
+let HEALTH = null, API_PROPS = null, API_WOS = null, API_TENANTS = null, API_LEASES_EXP = null, API_INSP = null, API_VENDORS = null, _bootstrapped = false;
+let DASH = null; let _dashLoading = false; let _lastScreen = null;
+async function safeApiGet(path){ try{ return await api(path); }catch(e){ return null; } }
+function formatSyncAgo(iso){
+  if(!iso) return '—';
+  try{
+    const t = (Date.now() - new Date(iso).getTime()) / 60000;
+    if(t < 2) return 'just now';
+    if(t < 60) return Math.floor(t) + 'm ago';
+    const h = Math.floor(t / 60);
+    if(h < 48) return h + 'h ago';
+    return Math.floor(h / 24) + 'd ago';
+  }catch(e){ return '—'; }
+}
+function formatRelIso(iso){
+  if(!iso) return '';
+  try{
+    const d = (Date.now() - new Date(iso).getTime()) / 60000;
+    if(d < 2) return 'just now';
+    if(d < 60) return Math.floor(d) + 'm ago';
+    if(d < 1440) return Math.floor(d / 60) + 'h ago';
+    return Math.floor(d / 1440) + 'd ago';
+  }catch(e){ return ''; }
+}
+function updateTopbarFromApi(){
+  const sub = document.getElementById('topbar-subtitle');
+  if(sub && HEALTH){ sub.textContent = 'Lionston Group · ' + HEALTH.properties + ' Properties · ' + HEALTH.units + ' Units'; }
+  const tx = document.getElementById('topbar-buildium-text');
+  if(tx){
+    const syncT = (DASH && DASH.last_buildium_sync) ? formatSyncAgo(DASH.last_buildium_sync) : (HEALTH && HEALTH.last_sync ? formatSyncAgo(HEALTH.last_sync) : '—');
+    const live = HEALTH && HEALTH.buildium_connected ? 'Live' : 'API';
+    tx.textContent = 'Buildium · ' + live + ' · synced ' + syncT;
+  }
+}
+async function bootstrapApp(force){
+  if(_bootstrapped && !force){ updateTopbarFromApi(); return; }
+  _dashLoading = true;
+  try{
+    const [h, dash, props, wos, ten, lexp, insp, vnd] = await Promise.all([
+      safeApiGet('/api/health'), safeApiGet('/api/dashboard'),
+      safeApiGet('/api/properties'), safeApiGet('/api/work-orders?limit=200'),
+      safeApiGet('/api/tenants'), safeApiGet('/api/leases/expiring?days=365'),
+      safeApiGet('/api/inspections'), safeApiGet('/api/vendors'),
+    ]);
+    HEALTH = h; if(dash) DASH = dash; API_PROPS = props; API_WOS = wos;
+    API_TENANTS = Array.isArray(ten) ? ten : null;
+    API_LEASES_EXP = Array.isArray(lexp) ? lexp : null;
+    API_INSP = Array.isArray(insp) ? insp : null;
+    API_VENDORS = Array.isArray(vnd) ? vnd : null;
+    _bootstrapped = true;
+    updateTopbarFromApi();
+  } finally{
+    _dashLoading = false;
+    if(_lastScreen && screens[_lastScreen]) navigate(_lastScreen);
+  }
+}
+async function loadDashboardOnce(){ await bootstrapApp(false); }
+async function triggerSync(full){
+  try{
+    await api('/api/sync/trigger?full=' + (full ? 'true' : 'false'), { method: 'POST' });
+    toast('Sync started — refreshing in a few seconds');
+    setTimeout(function(){ bootstrapApp(true); }, 5000);
+  }catch(e){
+    toast('Could not reach API — is the backend running on ' + API_BASE + '?');
+  }
+}
+
 // ── Clock ──────────────────────────────────────────────────────────
 (function clock(){
   const el=document.getElementById('topbar-clock');
@@ -628,6 +698,7 @@ function switchSection(sec){
 }
 
 function navigate(screen, el){
+  _lastScreen = screen;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   if(el) el.classList.add('active');
   const content = screens[screen];
@@ -730,9 +801,135 @@ const VENDORS = [
   {id:'VN-08',name:'Door King Solutions',specialty:'Doors & Security',phone:'416-555-0210',email:'service@doorking.ca',license:'N/A',insurance:'$1M',rating:4.3,active_wos:1,ytd_spend:980,preferred:false},
 ];
 
-function getProp(id){ return PROPERTIES.find(p=>p.id===id)||{}; }
-function getWO(id){ return WORK_ORDERS.find(w=>w.id===id)||{}; }
-function getTenant(id){ return TENANTS.find(t=>t.id===id)||{}; }
+function mapStructureDisplay(st){
+  const s = (st == null || st === '') ? '' : String(st);
+  if(/multi/i.test(s) || s === 'MultiFamily' || s === 'Apartment') return 'Multi-Family';
+  if(/single/i.test(s) || s === 'SingleFamily') return 'Single Family';
+  if(/commercial/i.test(s)) return 'Commercial';
+  if(/muskoka/i.test(s)) return 'Muskoka';
+  return s || 'Multi-Family';
+}
+function mapApiProperty(p){
+  const uc = Number(p.unit_count) || 0, oc = Number(p.occupied_count) || 0;
+  const pid = 'db-' + p.id;
+  return {
+    id: pid, _dbId: p.id, name: p.name || 'Property', city: p.city || '',
+    type: mapStructureDisplay(p.structure_type),
+    units: uc, occupied: oc, vacant: Math.max(0, uc - oc),
+    rent_avg: 0, ytd_revenue: 0, owner: '—', pm: '—',
+    year_built: p.year_built || null, sqft: p.sqft || null, notes: p.notes || '',
+    systems: {}, img: '🏢', active_wos: p.active_wos || 0, total_arrears: Number(p.total_arrears) || 0
+  };
+}
+function mapApiWorkOrder(w){
+  const pid = w.property_id != null ? 'db-' + w.property_id : '';
+  const desc = (w.description != null && w.description !== '') ? String(w.description) : '';
+  return {
+    id: w.wo_number || ('WO-' + w.id),
+    _dbId: w.id,
+    property: pid,
+    category: w.category || 'General',
+    priority: w.priority || 'Normal',
+    status: w.status || 'Submitted',
+    title: w.title || '(No title)',
+    desc,
+    tenant: w.tenant_name || '',
+    submitted: formatRelIso(w.created_at),
+    submitted_by: w.submitted_by || w.submitted_source || 'System',
+    vendor: w.vendor_name || null,
+    vendor_phone: w.vendor_phone || '',
+    est_cost: w.est_cost != null ? Number(w.est_cost) : null,
+    actual_cost: w.actual_cost != null ? Number(w.actual_cost) : null,
+    photos: 0,
+    notes: w.notes || '',
+    unit: w.unit_number != null ? String(w.unit_number) : '—'
+  };
+}
+function getPropertiesForUI(){
+  if(API_PROPS && API_PROPS.length) return API_PROPS.map(mapApiProperty);
+  return PROPERTIES;
+}
+function getWorkOrdersForUI(){
+  if(API_WOS && API_WOS.length) return API_WOS.map(mapApiWorkOrder);
+  return WORK_ORDERS;
+}
+function mapApiTenant(t){
+  const pid = t.property_ref_id != null ? 'db-' + t.property_ref_id : '';
+  const fn = (t.first_name || '').trim(), ln = (t.last_name || '').trim();
+  const name = (fn + ' ' + ln).trim() || '(Tenant)';
+  const bal = Number(t.arrears) || 0;
+  let tier = '—';
+  if(bal > 3000) tier = 'High Risk'; else if(bal > 0) tier = 'Watch'; else if((t.lease_status || '').toLowerCase().includes('active')) tier = 'Good Standing';
+  return {
+    id: 'db-' + t.id, _dbId: t.id, name, unit: t.unit_number != null ? String(t.unit_number) : '',
+    property: pid, email: t.email || '', phone: t.phone || t.alt_phone || '',
+    lease_start: t.lease_start ? String(t.lease_start).slice(0, 10) : '',
+    lease_end: t.end_date ? String(t.end_date).slice(0, 10) : '',
+    rent: Number(t.rent_amount) || 0, balance: bal,
+    status: t.lease_status || 'Current', tier, pets: '', notes: '', moveout: false, paid_ytd: 0
+  };
+}
+function mapApiExpiringLease(l){
+  const lt = String(l.lease_type || '');
+  const end = l.end_date ? new Date(l.end_date) : null;
+  const startStr = l.start_date ? String(l.start_date).slice(0, 10) : '';
+  const endStr = l.end_date ? String(l.end_date).slice(0, 10) : '';
+  let status = 'Active';
+  if(/month|atwill|at.will/i.test(lt) || lt === 'MTM') status = 'Month-to-Month';
+  else if(end){
+    const days = Math.ceil((end.getTime() - Date.now()) / 864e5);
+    if(days <= 30) status = 'Expiring 30 days';
+    else if(days <= 60) status = 'Expiring 60 days';
+    else if(days <= 90) status = 'Expiring 90 days';
+    else status = 'Expiring ' + days + ' days';
+  }
+  const tid = l.primary_tenant_id != null ? 'db-' + l.primary_tenant_id : '';
+  const pid = l.primary_property_id != null ? 'db-' + l.primary_property_id : '';
+  return {
+    id: 'L' + l.id, _dbId: l.id, tenant: tid, property: pid, unit: String(l.unit_number || ''),
+    start: startStr, end: endStr, rent: Number(l.rent_amount) || 0, deposit: Number(l.security_deposit) || 0,
+    status, type: /month|atwill|at.will/i.test(lt) || lt === 'MTM' ? 'MTM' : 'Fixed', renewal_offered: !!l.renewal_offered,
+    new_rent: l.renewal_offer_amount != null ? Number(l.renewal_offer_amount) : null, market_rent: null
+  };
+}
+function mapApiInspection(i){
+  const d = i.scheduled_date || i.completed_date || i.created_at;
+  return {
+    id: 'insp-' + i.id, _dbId: i.id, type: i.inspection_type || 'Routine',
+    property: i.property_id != null ? 'db-' + i.property_id : '',
+    unit: String(i.unit_number || ''), tenant: i.tenant_name || '',
+    date: d ? String(d).slice(0, 10) : '', inspector: i.inspector_name || '—', status: i.status || 'Scheduled',
+    overall: i.overall_result || i.overall_condition || null, duration: i.duration_minutes != null ? i.duration_minutes : null,
+    charges: Number(i.total_charges) || 0, notes: i.notes || '', next_steps: i.next_steps || ''
+  };
+}
+function mapApiVendor(v){
+  return {
+    id: 'vn-' + v.id, _dbId: v.id, name: v.company_name || 'Vendor', specialty: v.specialty || 'General',
+    phone: v.phone || '', email: v.email || '', license: v.license_type || '', insurance: v.insurance_amount || '',
+    rating: Number(v.avg_rating) || 0, active_wos: Number(v.active_wos) || 0, ytd_spend: Number(v.ytd_spend) || 0,
+    preferred: !!v.is_preferred
+  };
+}
+function getTenantsForUI(){
+  if(API_TENANTS && API_TENANTS.length) return API_TENANTS.map(mapApiTenant);
+  return TENANTS;
+}
+function getLeasesForUI(){
+  if(API_LEASES_EXP && API_LEASES_EXP.length) return API_LEASES_EXP.map(mapApiExpiringLease);
+  return LEASES;
+}
+function getInspectionsForUI(){
+  if(API_INSP && API_INSP.length) return API_INSP.map(mapApiInspection);
+  return INSPECTIONS_DATA;
+}
+function getVendorsForUI(){
+  if(API_VENDORS && API_VENDORS.length) return API_VENDORS.map(mapApiVendor);
+  return VENDORS;
+}
+function getProp(id){ return getPropertiesForUI().find(p => p.id === id) || {}; }
+function getWO(id){ return getWorkOrdersForUI().find(w => w.id === id) || {}; }
+function getTenant(id){ return getTenantsForUI().find(t=>t.id===id)||{}; }
 
 // Active WO state tracking
 let _selectedWO = null;
@@ -747,15 +944,19 @@ const screens = {
 
 // ─────────────────────────────────────────────────────────────────
 'portfolio-overview':()=>{
-  const totalUnits = PROPERTIES.reduce((s,p)=>s+p.units,0);
-  const occupied   = PROPERTIES.reduce((s,p)=>s+p.occupied,0);
-  const vacant     = PROPERTIES.reduce((s,p)=>s+p.vacant,0);
-  const occPct     = Math.round(occupied/totalUnits*100);
-  const ytdRev     = PROPERTIES.reduce((s,p)=>s+p.ytd_revenue,0);
-  const activeWOs  = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status)).length;
-  const emergency  = WORK_ORDERS.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length;
-  const delinquent = TENANTS.filter(t=>t.balance>0).length;
-  const totalArrears = TENANTS.reduce((s,t)=>s+(t.balance>0?t.balance:0),0);
+  loadDashboardOnce();
+  const d = DASH;
+  const _PF = getPropertiesForUI();
+  const _WF = getWorkOrdersForUI();
+  const totalUnits = d ? d.total_units : _PF.reduce((s,p)=>s+p.units,0);
+  const occupied   = d ? d.occupied_units : _PF.reduce((s,p)=>s+p.occupied,0);
+  const vacant     = d ? d.vacant_units : _PF.reduce((s,p)=>s+p.vacant,0);
+  const occPct     = d ? Math.round(d.occupancy_pct) : (totalUnits ? Math.round(occupied/totalUnits*100) : 0);
+  const ytdRev     = _PF.reduce((s,p)=>s+p.ytd_revenue,0);
+  const activeWOs  = d ? d.active_work_orders : _WF.filter(w=>!['Completed','Closed'].includes(w.status)).length;
+  const emergency  = d ? d.urgent_work_orders : _WF.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length;
+  const delinquent = d ? d.delinquent_accounts : getTenantsForUI().filter(t=>t.balance>0).length;
+  const totalArrears = d ? d.total_arrears : getTenantsForUI().reduce((s,t)=>s+(t.balance>0?t.balance:0),0);
 
   return `
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -775,11 +976,11 @@ const screens = {
   <div style="display:flex;align-items:center;gap:6px">
     <div class="dot" style="width:7px;height:7px;border-radius:50%;background:var(--green)"></div>
     <span style="font-weight:600;color:var(--green)">Buildium</span>
-    <span style="color:var(--text3)">last synced 4m ago</span>
+    <span style="color:var(--text3)">${d && d.last_buildium_sync ? 'last synced ' + formatSyncAgo(d.last_buildium_sync) : (HEALTH && HEALTH.last_sync ? formatSyncAgo(HEALTH.last_sync) : 'not synced yet')}</span>
   </div>
   <span style="color:var(--text3)">·</span>
-  <span style="color:var(--text2)">325 units · 54 properties · ${occupied} occupied · ${vacant} vacant</span>
-  <button class="btn btn-sm" style="margin-left:auto" onclick="navigate('buildium-status');switchSection('buildium')">Sync Now</button>
+  <span style="color:var(--text2)">${totalUnits} units · ${d ? d.total_properties : _PF.length} properties · ${occupied} occupied · ${vacant} vacant</span>
+  <button class="btn btn-sm" style="margin-left:auto" onclick="triggerSync(false);navigate('buildium-status');switchSection('buildium')">Sync Now</button>
 </div>
 
 <!-- KPI row -->
@@ -793,7 +994,7 @@ const screens = {
   <div class="kpi a">
     <div class="kpi-label">Vacant Units</div>
     <div class="kpi-val a">${vacant}</div>
-    <div class="kpi-sub">Across ${PROPERTIES.filter(p=>p.vacant>0).length} properties</div>
+    <div class="kpi-sub">Across ${_PF.filter(p=>p.vacant>0).length} properties</div>
     <span class="kpi-delta dn">↑ 3 new vacancies</span>
   </div>
   <div class="kpi g">
@@ -816,7 +1017,7 @@ const screens = {
   </div>
   <div class="kpi a">
     <div class="kpi-label">Expiring Leases</div>
-    <div class="kpi-val a">8</div>
+    <div class="kpi-val a">${d ? d.expiring_leases_90d : 8}</div>
     <div class="kpi-sub">Next 90 days</div>
     <span class="kpi-delta dn">3 within 30 days</span>
   </div>
@@ -831,11 +1032,12 @@ const screens = {
       <div class="card-hd" style="border-bottom:1px solid var(--border)">
         <svg viewBox="0 0 24 24" stroke="var(--red)" fill="none"><polygon points="13,2 3,14 12,14 11,22 21,10 12,10"/></svg>
         <h3>Needs Immediate Attention</h3>
-        <span class="badge b-red" style="margin-left:auto">${WORK_ORDERS.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length} active</span>
+        <span class="badge b-red" style="margin-left:auto">${_WF.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length} active</span>
       </div>
-      ${WORK_ORDERS.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).map(wo=>{
+      ${_WF.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).map(wo=>{
         const p=getProp(wo.property);
-        return `<div class="wo-card ${wo.priority.toLowerCase()}" onclick="selectWO('${wo.id}');navigate('wo-board');switchSection('workorders')">
+        const dsc = (wo.desc || '').substring(0,100);
+        return `<div class="wo-card ${wo.priority.toLowerCase()}" onclick="selectWO('${wo.id.replace(/'/g,"\\'")}');navigate('wo-board');switchSection('workorders')">
           <div style="display:flex;align-items:flex-start;gap:10px">
             <div style="flex:1">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
@@ -843,7 +1045,7 @@ const screens = {
                 <span style="font-size:12px;font-weight:600">${wo.title}</span>
               </div>
               <div style="font-size:11px;color:var(--text3)">${p.name||wo.property} · Unit ${wo.unit} · ${wo.submitted}</div>
-              <div style="font-size:11px;color:var(--text2);margin-top:3px">${wo.desc.substring(0,100)}...</div>
+              <div style="font-size:11px;color:var(--text2);margin-top:3px">${dsc}${(wo.desc||'').length>100?'...':''}</div>
             </div>
             <div style="text-align:right;flex-shrink:0">
               <span class="badge b-amber" style="display:block;margin-bottom:4px">${wo.status}</span>
@@ -859,15 +1061,15 @@ const screens = {
       <div class="card-hd" style="border-bottom:1px solid var(--border)">
         <svg viewBox="0 0 24 24" fill="none" stroke="var(--green)"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
         <h3>Property Health</h3>
-        <span style="font-size:11px;color:var(--text3);margin-left:auto">${PROPERTIES.length} shown · click to view</span>
+        <span style="font-size:11px;color:var(--text3);margin-left:auto">${_PF.length} shown · click to view</span>
       </div>
       <table class="tbl">
         <thead><tr><th>PROPERTY</th><th>TYPE</th><th>CITY</th><th>OCCUPANCY</th><th>ACTIVE WOs</th><th>ARREARS</th><th>PM</th><th>STATUS</th></tr></thead>
         <tbody>
-          ${PROPERTIES.slice(0,8).map(p=>{
-            const occ = Math.round(p.occupied/p.units*100);
-            const pWOs = WORK_ORDERS.filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
-            const pArr = TENANTS.filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
+          ${_PF.slice(0,8).map(p=>{
+            const occ = p.units ? Math.round(p.occupied/p.units*100) : 0;
+            const pWOs = _WF.filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
+            const pArr = p._dbId != null ? (Number(p.total_arrears)||0) : getTenantsForUI().filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
             const health = pWOs>2||pArr>2000?'Attention':occ<90?'Watch':'Good';
             return `<tr onclick="selectProp('${p.id}');navigate('prop-directory');switchSection('properties')" style="cursor:pointer">
               <td><span style="font-size:13px">${p.img}</span> <span style="font-weight:600">${p.name}</span></td>
@@ -888,7 +1090,7 @@ const screens = {
         </tbody>
       </table>
       <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:space-between">
-        <span style="font-size:11px;color:var(--text3)">Showing top 8 · 54 total properties</span>
+        <span style="font-size:11px;color:var(--text3)">Showing top 8 · ${d ? d.total_properties : _PF.length} total properties</span>
         <button class="btn btn-sm" onclick="navigate('prop-directory');switchSection('properties')">View All Properties →</button>
       </div>
     </div>
@@ -916,7 +1118,7 @@ const screens = {
         <div class="pbar"><div class="pbar-fill" style="width:82%;background:var(--green)"></div></div>
         <div style="font-size:10px;color:var(--text3);margin-top:5px">82% collected · $101,180 total expected</div>
         <div style="margin-top:10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:6px">Delinquent Accounts</div>
-        ${TENANTS.filter(t=>t.balance>0).map(t=>{
+        ${getTenantsForUI().filter(t=>t.balance>0).map(t=>{
           const p=getProp(t.property);
           const days = t.balance>3000?'60 days':'30 days';
           return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(30,45,68,0.3)">
@@ -961,7 +1163,7 @@ const screens = {
     <div class="card">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Expiring Leases</h3><span class="badge b-amber" style="margin-left:auto">8 in 90 days</span></div>
       <div style="padding:10px 14px">
-        ${LEASES.filter(l=>l.status.includes('Expiring')||l.status.includes('MTM')).map((l,i)=>{
+        ${getLeasesForUI().filter(l=>l.status.includes('Expiring')||l.status.includes('MTM')).map((l,i)=>{
           const t=getTenant(l.tenant);
           const p=getProp(l.property);
           const pct = l.status.includes('30')?85:l.status.includes('60')?60:40;
@@ -986,8 +1188,9 @@ const screens = {
 // ─────────────────────────────────────────────────────────────────
 'prop-directory':()=>{
   const typeFilter = window._propTypeFilter || 'All';
-  const viewMode   = window._propView || 'tile'; // 'tile' | 'table' | 'chart'
-  const props = typeFilter==='All' ? PROPERTIES : PROPERTIES.filter(p=>p.type===typeFilter);
+  const viewMode   = window._propView || 'tile';
+  const PL = getPropertiesForUI();
+  const props = typeFilter==='All' ? PL : PL.filter(p=>p.type===typeFilter);
   const totalUnits = props.reduce((s,p)=>s+p.units,0);
   const totalOcc   = props.reduce((s,p)=>s+p.occupied,0);
   const totalRev   = props.reduce((s,p)=>s+p.ytd_revenue,0);
@@ -997,8 +1200,8 @@ const screens = {
 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px">
   ${props.map(p=>{
     const occ = Math.round(p.occupied/p.units*100);
-    const pWOs = WORK_ORDERS.filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
-    const pArr = TENANTS.filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
+    const pWOs = getWorkOrdersForUI().filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
+    const pArr = getTenantsForUI().filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
     const pPMOverdue = (typeof PM_SCHEDULES!=='undefined') ? PM_SCHEDULES.filter(s=>s.status==='overdue'&&(s.property===p.id||s.building===p.name)).length : 0;
     const ll = LANDLORDS[p.owner]||{};
     const typeColor = p.type==='Multi-Family'?'var(--blue)':p.type==='Commercial'?'var(--purple)':p.type==='Muskoka'?'var(--teal)':'var(--green)';
@@ -1061,9 +1264,9 @@ const screens = {
     <tbody>
       ${props.map(p=>{
         const occ  = Math.round(p.occupied/p.units*100);
-        const pWOs = WORK_ORDERS.filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status));
+        const pWOs = getWorkOrdersForUI().filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status));
         const pEmrg= pWOs.filter(w=>['Emergency','Urgent'].includes(w.priority));
-        const pArr = TENANTS.filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
+        const pArr = getTenantsForUI().filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
         const pPMOverdue = (typeof PM_SCHEDULES!=='undefined') ? PM_SCHEDULES.filter(s=>s.status==='overdue'&&(s.property===p.id||s.building===p.name)).length : 0;
         const ll   = LANDLORDS[p.owner]||{};
         return `<tr onclick="showPropDetail('${p.id}')" style="cursor:pointer">
@@ -1174,8 +1377,8 @@ const screens = {
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;padding:14px">
       ${props.map(p=>{
         const occ=Math.round(p.occupied/p.units*100);
-        const pWOs=WORK_ORDERS.filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
-        const pArr=TENANTS.filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
+        const pWOs=getWorkOrdersForUI().filter(w=>w.property===p.id&&!['Completed','Closed'].includes(w.status)).length;
+        const pArr=getTenantsForUI().filter(t=>t.property===p.id&&t.balance>0).reduce((s,t)=>s+t.balance,0);
         const score = Math.round(occ*0.4 + (pWOs===0?40:pWOs<3?25:10) + (pArr===0?20:pArr<2000?10:0));
         const scoreColor = score>=85?'var(--green)':score>=65?'var(--amber)':'var(--red)';
         return `<div style="background:var(--bg4);border:1px solid var(--border);border-radius:10px;padding:12px;cursor:pointer" onclick="showPropDetail('${p.id}')">
@@ -1209,7 +1412,7 @@ const screens = {
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
   <div style="display:flex;gap:5px">
     ${['All','Multi-Family','Single Family','Commercial','Muskoka'].map(t=>`
-    <button onclick="window._propTypeFilter='${t}';navigate('prop-directory')" class="btn btn-sm ${typeFilter===t?'btn-green':''}">${t}${t==='All'?' ('+PROPERTIES.length+')':''}</button>`).join('')}
+    <button onclick="window._propTypeFilter='${t}';navigate('prop-directory')" class="btn btn-sm ${typeFilter===t?'btn-green':''}">${t}${t==='All'?' ('+PL.length+')':''}</button>`).join('')}
   </div>
   <div style="flex:1"></div>
   <!-- View toggle -->
@@ -1235,8 +1438,9 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
 
 // ─────────────────────────────────────────────────────────────────
 'wo-board':()=>{
-  const active = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status));
-  const completed = WORK_ORDERS.filter(w=>['Completed','Closed'].includes(w.status));
+  const _WFL = getWorkOrdersForUI();
+  const active = _WFL.filter(w=>!['Completed','Closed'].includes(w.status));
+  const completed = _WFL.filter(w=>['Completed','Closed'].includes(w.status));
   const byPri = {Emergency:0,Urgent:0,High:0,Normal:0,Low:0,Preventive:0};
   active.forEach(w=>{if(byPri[w.priority]!==undefined)byPri[w.priority]++});
 
@@ -1261,11 +1465,11 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
 <!-- Filter bar -->
 <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">
   ${['All','Emergency','Urgent','High','Normal','Preventive','Completed'].map(f=>`
-  <button onclick="window._woFilter='${f}';navigate('wo-board')" class="btn btn-sm ${(window._woFilter||'All')===f?'btn-green':''}">${f}${f==='All'?' ('+WORK_ORDERS.length+')':''}</button>`).join('')}
+  <button onclick="window._woFilter='${f}';navigate('wo-board')" class="btn btn-sm ${(window._woFilter||'All')===f?'btn-green':''}">${f}${f==='All'?' ('+_WFL.length+')':''}</button>`).join('')}
   <div style="flex:1;display:flex;gap:6px;justify-content:flex-end">
     <select style="background:var(--bg4);border:1px solid var(--border);border-radius:7px;color:var(--text2);font-size:11px;padding:5px 10px" onchange="window._woPropertyFilter=this.value;navigate('wo-board')">
       <option value="">All Properties</option>
-      ${PROPERTIES.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+      ${getPropertiesForUI().map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
     </select>
   </div>
 </div>
@@ -1275,7 +1479,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
   <div>
     <div style="display:flex;flex-direction:column;gap:8px">
       ${(()=>{
-        let wos = [...WORK_ORDERS];
+        let wos = [..._WFL];
         const f = window._woFilter||'All';
         const pf = window._woPropertyFilter||'';
         if(f!=='All'&&f!=='Completed') wos=wos.filter(w=>w.priority===f&&!['Completed','Closed'].includes(w.status));
@@ -1348,11 +1552,11 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
     <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Work Order Details</h3></div>
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
-        ['Property','select','property','',PROPERTIES.map(p=>`<option>${p.name}</option>`).join(''),''],
+        ['Property','select','property','',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join(''),''],
         ['Unit / Location','text','unit','','','Unit number or Common Area'],
         ['Category','select','category','',['HVAC','Plumbing','Electrical','Appliance','Structural','Landscaping','Pest Control','Flooring','Painting','Roofing','Other'].map(c=>`<option>${c}</option>`).join(''),''],
         ['Priority','select','priority','',['Normal','High','Urgent','Emergency','Low','Preventive'].map(p=>`<option>${p}</option>`).join(''),''],
-        ['Vendor','select','vendor','',['— Assign Later —',...VENDORS.map(v=>`<option>${v.name}</option>`)].join(''),''],
+        ['Vendor','select','vendor','',['— Assign Later —',...getVendorsForUI().map(v=>`<option>${v.name}</option>`)].join(''),''],
         ['Estimated Cost','text','est_cost','','','$'],
         ['Submitted By','select','submitted_by','',['Tenant Portal','Tenant Call','PM Inspection','PM Schedule','Owner Request'].map(s=>`<option>${s}</option>`).join(''),''],
         ['Tenant Notified','select','notified','',['Yes','No'].map(s=>`<option>${s}</option>`).join(''),''],
@@ -1412,7 +1616,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
     <table class="tbl">
       <thead><tr><th>VENDOR</th><th>SPECIALTY</th><th>WORK ORDERS</th><th>SPEND</th><th>RATING</th></tr></thead>
       <tbody>
-        ${VENDORS.sort((a,b)=>b.ytd_spend-a.ytd_spend).map(v=>`
+        ${[...getVendorsForUI()].sort((a,b)=>b.ytd_spend-a.ytd_spend).map(v=>`
         <tr>
           <td><div style="font-weight:600">${v.name}</div><div style="font-size:10px;color:var(--text3)">${v.preferred?'⭐ Preferred':''}</div></td>
           <td><span class="badge b-gray">${v.specialty}</span></td>
@@ -1432,7 +1636,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
   <button class="btn btn-green btn-sm">+ Add Vendor</button>
 </div>
 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
-  ${VENDORS.map(v=>`
+  ${getVendorsForUI().map(v=>`
   <div class="card" style="margin-bottom:0">
     <div style="padding:14px">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
@@ -1474,7 +1678,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
     <table class="tbl">
       <thead><tr><th>ID</th><th>TYPE</th><th>PROPERTY / UNIT</th><th>TENANT</th><th>DATE</th><th>INSPECTOR</th><th>STATUS</th><th>RESULT</th></tr></thead>
       <tbody>
-        ${INSPECTIONS_DATA.map(ins=>`
+        ${getInspectionsForUI().map(ins=>`
         <tr onclick="showInspDetail('${ins.id}')" style="cursor:pointer">
           <td style="font-family:var(--font-mono);font-size:10px">${ins.id}</td>
           <td><span class="badge ${ins.type==='Move-Out'?'b-orange':ins.type==='Move-In'?'b-green':ins.type==='Routine'?'b-blue':ins.type==='Drive-By'?'b-teal':'b-purple'}">${ins.type}</span></td>
@@ -1567,7 +1771,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
       </div>
     </div>
     <div class="card">
-      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Photos — ${INSPECTIONS_DATA[0].charges>0?6:0} attached</h3></div>
+      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Photos — ${(getInspectionsForUI()[0]||{charges:0}).charges>0?6:0} attached</h3></div>
       <div style="padding:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
         ${[['Living Room Floor','Hardwood scratches'],['Living Room Floor 2','Close-up damage'],['Bathroom Grout','Mildew buildup'],['Blind — broken','Slat broken'],['Backyard','Overgrown lawn'],['Kitchen Counter','Scratch marks']].map(([label,sub])=>`
         <div style="background:var(--bg4);border:1px solid var(--border);border-radius:6px;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;hover:opacity:0.8">
@@ -1657,7 +1861,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
     <!-- Renewals due -->
     <div class="card">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Renewals — Next 90 Days</h3></div>
-      ${LEASES.filter(l=>l.status.includes('Expiring')||l.status.includes('MTM')).map(l=>{
+      ${getLeasesForUI().filter(l=>l.status.includes('Expiring')||l.status.includes('MTM')).map(l=>{
         const t=getTenant(l.tenant);
         const p=getProp(l.property);
         return `<div style="padding:10px 14px;border-bottom:1px solid rgba(30,45,68,0.4)">
@@ -1787,7 +1991,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
   <div>
     <div class="card" style="margin-bottom:14px">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Delinquency Report</h3><span class="badge b-red" style="margin-left:auto">$6,580</span></div>
-      ${TENANTS.filter(t=>t.balance>0).map(t=>{
+      ${getTenantsForUI().filter(t=>t.balance>0).map(t=>{
         const p=getProp(t.property);
         const days = t.balance>3000?'60+ days':'30 days';
         return `<div style="padding:10px 14px;border-bottom:1px solid rgba(30,45,68,0.4)">
@@ -1829,13 +2033,13 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
   <div style="display:flex;gap:6px"><button class="btn btn-sm">Export CSV</button><button class="btn btn-sm">Print</button></div>
 </div>
 <div class="kpi-row c4" style="margin-bottom:14px">
-  ${[['Total Units',TENANTS.length,'b'],['Monthly Rent Roll','$'+TENANTS.reduce((s,t)=>s+t.rent,0).toLocaleString(),'g'],['Collected','$82,400','g'],['Balance Outstanding','$18,780','r']].map(([l,v,c])=>`
+  ${[['Total Units',getTenantsForUI().length,'b'],['Monthly Rent Roll','$'+getTenantsForUI().reduce((s,t)=>s+t.rent,0).toLocaleString(),'g'],['Collected','$82,400','g'],['Balance Outstanding','$18,780','r']].map(([l,v,c])=>`
   <div class="kpi ${c}"><div class="kpi-label">${l}</div><div class="kpi-val ${c}">${v}</div></div>`).join('')}
 </div>
 <table class="tbl">
   <thead><tr><th>TENANT</th><th>PROPERTY</th><th>UNIT</th><th>LEASE TYPE</th><th>MONTHLY RENT</th><th>PAID MTD</th><th>BALANCE</th><th>LEASE END</th><th>STATUS</th></tr></thead>
   <tbody>
-    ${TENANTS.map(t=>{
+    ${getTenantsForUI().map(t=>{
       const p=getProp(t.property);
       const paid = t.balance===0?t.rent:t.balance>t.rent?0:t.rent-t.balance;
       return `<tr>
@@ -1947,7 +2151,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
     <svg width="18" height="18" viewBox="0 0 24 24" stroke="var(--green)" fill="none" stroke-width="1.5"><polyline points="1,4 1,10 7,10"/><polyline points="23,20 23,14 17,14"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
     <span style="font-size:16px;font-weight:800;font-family:var(--font-display);color:var(--green)">Buildium API Integration</span>
     <span class="badge b-green" style="margin-left:auto">Connected · Active</span>
-    <button class="btn btn-green btn-sm" onclick="toast('✓ Sync triggered — pulling all updates')">Sync Now</button>
+    <button class="btn btn-green btn-sm" onclick="triggerSync(true)">Sync Now</button>
   </div>
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px">
     ${[['Last Sync','4m ago','green'],['Properties','54 / 54','green'],['Units','325 / 325','green'],['Pending Push','3 items','amber'],['API Status','200 OK','green']].map(([l,v,c])=>`
@@ -2030,7 +2234,7 @@ ${viewMode==='tile' ? tileView : viewMode==='table' ? tableView : chartView}
 <table class="tbl">
   <thead><tr><th>RESIDENT</th><th>PROPERTY / UNIT</th><th>LEASE STATUS</th><th>RENT</th><th>BALANCE</th><th>LEASE END</th><th>TIER</th><th></th></tr></thead>
   <tbody>
-    ${TENANTS.map(t=>{
+    ${getTenantsForUI().map(t=>{
       const p=getProp(t.property);
       return `<tr onclick="showTenantDetail('${t.id}')" style="cursor:pointer">
         <td>
@@ -2177,7 +2381,7 @@ function renderWODetail(woId){
           </div>`
         : `<div style="display:flex;gap:6px">
             <select style="flex:1;padding:5px 8px;background:var(--bg4);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px">
-              <option>— Select Vendor —</option>${VENDORS.map(v=>`<option>${v.name}</option>`).join('')}
+              <option>— Select Vendor —</option>${getVendorsForUI().map(v=>`<option>${v.name}</option>`).join('')}
             </select>
             <button class="btn btn-xs btn-green" onclick="toast('✓ Vendor assigned and notified')">Assign</button>
           </div>`
@@ -2243,7 +2447,7 @@ function showPropDetail(id){ /* Property detail slide-in */ }
 function showTenantDetail(id){ /* Tenant detail slide-in */ }
 
 function showInspDetail(id){
-  const ins = INSPECTIONS_DATA.find(i=>i.id===id);
+  const ins = getInspectionsForUI().find(i=>i.id===id);
   if(!ins) return;
   const panel = document.getElementById('insp-detail-panel');
   if(!panel) return;
@@ -2646,7 +2850,7 @@ function renderBuildingOverview(b,p){
     <!-- Active WOs for this building -->
     <div class="card">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Active Work Orders</h3></div>
-      ${WORK_ORDERS.filter(w=>w.property===b.id&&!['Completed','Closed'].includes(w.status)).map(wo=>`
+      ${getWorkOrdersForUI().filter(w=>w.property===b.id&&!['Completed','Closed'].includes(w.status)).map(wo=>`
       <div class="wo-card ${wo.priority.toLowerCase()}" style="margin:8px 10px;border-radius:7px" onclick="selectWO('${wo.id}');navigate('wo-board');switchSection('workorders')">
         <div style="display:flex;align-items:center;gap:8px">
           <span class="pri pri-${wo.priority.toLowerCase()}">${wo.priority}</span>
@@ -2704,7 +2908,7 @@ function renderBuildingUnits(b,p){
       const unitNum = `${fl}0${u}`.slice(-3);
       if(knownUnits[unitNum]) allUnits.push(knownUnits[unitNum]);
       else {
-        const tenant = TENANTS.find(t=>t.property===b.id&&t.unit===unitNum);
+        const tenant = getTenantsForUI().find(t=>t.property===b.id&&t.unit===unitNum);
         allUnits.push({id:'sim',property:b.id,unit:unitNum,floor:fl,
           sqft:fl<=2?920:fl<=4?1050:1150,beds:u%3===0?2:1,baths:u%3===0?2:1,
           rent_current:fl<=2?2380:fl<=4?2520:2700,
@@ -2736,8 +2940,8 @@ function renderBuildingUnits(b,p){
         <div style="font-size:10px;font-weight:700;color:var(--text3);width:40px;text-align:right;font-family:var(--font-mono)">FL ${fl}</div>
         <div style="display:flex;gap:5px;flex-wrap:wrap">
           ${flUnits.map(u=>{
-            const hasWO = WORK_ORDERS.some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
-            const isDelinq = TENANTS.find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
+            const hasWO = getWorkOrdersForUI().some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
+            const isDelinq = getTenantsForUI().find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
             const color = u.status==='Vacant'?'var(--red)':hasWO||isDelinq?'var(--amber)':'var(--green)';
             return `<div onclick="showUnitDetail('${b.id}','${u.unit}')" style="width:72px;height:44px;background:${u.status==='Vacant'?'rgba(239,68,68,0.1)':hasWO||isDelinq?'rgba(245,158,11,0.1)':'rgba(0,200,150,0.07)'};border:1px solid ${color};border-radius:7px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:all 0.12s;position:relative" title="${u.unit} — ${u.status}">
               <div style="font-size:11px;font-weight:700;font-family:var(--font-mono);color:${color}">${u.unit}</div>
@@ -2762,8 +2966,8 @@ function renderBuildingUnits(b,p){
     <thead><tr><th>UNIT</th><th>FL</th><th>TYPE</th><th>SQFT</th><th>CURRENT TENANT</th><th>RENT</th><th>STATUS</th><th>CONDITION</th><th>OPEN WOs</th><th></th></tr></thead>
     <tbody>
       ${allUnits.map(u=>{
-        const tenant = TENANTS.find(t=>t.property===b.id&&t.unit===u.unit);
-        const wos = WORK_ORDERS.filter(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
+        const tenant = getTenantsForUI().find(t=>t.property===b.id&&t.unit===u.unit);
+        const wos = getWorkOrdersForUI().filter(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
         return `<tr onclick="showUnitDetail('${b.id}','${u.unit}')" style="cursor:pointer">
           <td style="font-family:var(--font-mono);font-weight:700">${u.unit}</td>
           <td style="font-family:var(--font-mono)">${u.floor}</td>
@@ -2954,10 +3158,10 @@ function showUnitDetail(propId, unitNum){
 function renderUnitDetail(propId, unitNum){
   const unitKey = propId+'-'+unitNum;
   const u = UNITS[unitKey] || {property:propId, unit:unitNum, floor:unitNum[0], status:'—',beds:'?',baths:'?',rent_current:0,condition:'—',appliances:{}};
-  const tenant = TENANTS.find(t=>t.property===propId&&t.unit===unitNum);
+  const tenant = getTenantsForUI().find(t=>t.property===propId&&t.unit===unitNum);
   const tenantHistory = TENANT_HISTORY[unitKey]||[];
   const serviceHistory = SERVICE_HISTORY[unitKey]||[];
-  const wos = WORK_ORDERS.filter(w=>w.property===propId&&w.unit===unitNum);
+  const wos = getWorkOrdersForUI().filter(w=>w.property===propId&&w.unit===unitNum);
   const activeWOs = wos.filter(w=>!['Completed','Closed'].includes(w.status));
   const b = BUILDINGS_DETAIL[propId];
   const totalServiceCost = serviceHistory.filter(s=>s.cost).reduce((sum,s)=>sum+(s.cost||0),0);
@@ -3015,7 +3219,7 @@ function renderUnitTenantTab(tenant, u, propId, unitNum){
   </div>`;
 
   const tp = TENANT_PROFILES[tenant.id];
-  const lease = LEASES.find(l=>l.tenant===tenant.id);
+  const lease = getLeasesForUI().find(l=>l.tenant===tenant.id);
   const leaseProgress = lease ? Math.min(100,Math.round((new Date()-new Date(lease.start))/(new Date(lease.end)-new Date(lease.start))*100)) : 50;
 
   return `<div style="padding:14px 16px">
@@ -3189,7 +3393,7 @@ function showTenantProfile(tenantId){
 
 screens['tenant-profile'] = function(){
   const tid = window._tenantProfileId;
-  const tenant = TENANTS.find(t=>t.id===tid);
+  const tenant = getTenantsForUI().find(t=>t.id===tid);
   const tp = TENANT_PROFILES[tid];
   if(!tenant) return `<div style="padding:40px;text-align:center;color:var(--text3)">Tenant profile not found.<br><br><button class="btn" onclick="navigate('resident-directory')">← Residents</button></div>`;
 
@@ -3857,7 +4061,7 @@ screens['ft-dispatch'] = () => `
     <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Task Details</h3></div>
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Unit','text',''],
         ['Task Type','select',['HVAC Service','Plumbing Repair','Electrical','Inspection','Appliance','General Maintenance','Emergency Response','Pest Control'].map(t=>`<option>${t}</option>`).join('')],
         ['Priority','select',['Normal','High','Urgent','Emergency'].map(p=>`<option>${p}</option>`).join('')],
@@ -4102,7 +4306,7 @@ screens['opex-entry'] = () => `
     <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Bill Details</h3></div>
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Bill Category','select',['Hydro / Electricity','Natural Gas','Water / Sewer','Maintenance','Insurance','Landscaping','Management Fee','Property Tax','Other'].map(c=>`<option>${c}</option>`).join('')],
         ['Invoice Amount','number','$0.00'],
         ['Billing Period','select',['Jan 2026','Feb 2026','Mar 2026','Apr 2026','May 2026'].map(m=>`<option>${m}</option>`).join('')],
@@ -4144,7 +4348,7 @@ screens['iot-dashboard'] = () => {
     <button class="btn btn-sm" onclick="navigate('iot-install')">+ Register Device</button>
     <select style="padding:6px 10px;background:var(--bg4);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:11px">
       <option>All Properties</option>
-      ${PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')}
+      ${getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')}
     </select>
   </div>
 </div>
@@ -4356,7 +4560,7 @@ screens['iot-install'] = () => `
     <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Device Configuration</h3></div>
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Location / Room','text','e.g. Mechanical Room B1'],
         ['Device Type','select',['Vibration Sensor','Acoustic Sensor','Sump Pump Level','Temperature Sensor','Water Leak Sensor','CO Detector','Pressure Sensor','Humidity Sensor','Current Sensor','Smoke Detector'].map(t=>`<option>${t}</option>`).join('')],
         ['Target Equipment','text','e.g. Boiler Unit A'],
@@ -4565,7 +4769,7 @@ function assignWO(woId, techId){
   if(!TECH_ACTIVE_WOS[techId]) TECH_ACTIVE_WOS[techId]=[];
   if(!TECH_ACTIVE_WOS[techId].includes(woId)) TECH_ACTIVE_WOS[techId].push(woId);
   const tech = FIELD_TECHS.find(t=>t.id===techId);
-  const wo   = WORK_ORDERS.find(w=>w.id===woId);
+  const wo   = getWorkOrdersForUI().find(w=>w.id===woId);
   if(wo&&!['Completed','Closed'].includes(wo.status)) wo.status='Dispatched';
   toast(`✓ ${wo?.title?.slice(0,35)} → assigned to ${tech?.name}`);
   window._triageWO = null;
@@ -4586,19 +4790,19 @@ function unassignWO(woId){
 // ═══════════════════════════════════════════════════════════════════
 screens['wo-triage'] = () => {
   const selectedWoId = window._triageWO;
-  const selWO = WORK_ORDERS.find(w=>w.id===selectedWoId);
+  const selWO = getWorkOrdersForUI().find(w=>w.id===selectedWoId);
   const triageFilter = window._triageFilter || 'Unassigned';
 
   // Sort WOs: unassigned first, then by priority
   const priOrder = {Emergency:0,Urgent:1,High:2,Normal:3,Low:4,Preventive:5};
-  let queueWOs = [...WORK_ORDERS]
+  let queueWOs = [...getWorkOrdersForUI()]
     .filter(w=>!['Completed','Closed'].includes(w.status))
     .sort((a,b)=>(priOrder[a.priority]||9)-(priOrder[b.priority]||9));
 
   if(triageFilter==='Unassigned') queueWOs = queueWOs.filter(w=>!WO_ASSIGNMENTS[w.id]);
   else if(triageFilter==='Assigned') queueWOs = queueWOs.filter(w=>!!WO_ASSIGNMENTS[w.id]);
 
-  const unassignedCount = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
+  const unassignedCount = getWorkOrdersForUI().filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
 
   return `
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
@@ -4659,7 +4863,7 @@ screens['wo-triage'] = () => {
           <div style="font-size:10px;color:var(--text3)">Needs Assignment</div>
         </div>
         <div style="padding:10px 16px;background:var(--bg4);border-radius:8px;border:1px solid var(--border);text-align:center;flex:1">
-          <div style="font-size:20px;font-weight:800;color:var(--amber);font-family:var(--font-display)">${WORK_ORDERS.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length}</div>
+          <div style="font-size:20px;font-weight:800;color:var(--amber);font-family:var(--font-display)">${getWorkOrdersForUI().filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length}</div>
           <div style="font-size:10px;color:var(--text3)">Emergency/Urgent</div>
         </div>
         <div style="padding:10px 16px;background:var(--bg4);border-radius:8px;border:1px solid var(--border);text-align:center;flex:1">
@@ -4844,7 +5048,7 @@ function renderTriageTechRoster(selWO){
 // TECH WORKLOAD MANAGEMENT SCREEN
 // ═══════════════════════════════════════════════════════════════════
 screens['ft-workload'] = () => {
-  const allActiveWOs = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status));
+  const allActiveWOs = getWorkOrdersForUI().filter(w=>!['Completed','Closed'].includes(w.status));
   const assignedCount = Object.keys(WO_ASSIGNMENTS).length;
   const unassignedCount = allActiveWOs.filter(w=>!WO_ASSIGNMENTS[w.id]).length;
 
@@ -4870,7 +5074,7 @@ screens['ft-workload'] = () => {
 
 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px">
   ${FIELD_TECHS.map(tech=>{
-    const assignedWOs  = (TECH_ACTIVE_WOS[tech.id]||[]).map(id=>WORK_ORDERS.find(w=>w.id===id)).filter(Boolean);
+    const assignedWOs  = (TECH_ACTIVE_WOS[tech.id]||[]).map(id=>getWorkOrdersForUI().find(w=>w.id===id)).filter(Boolean);
     const scheduleWOs  = tech.schedule.filter(s=>s.wo);
     const totalLoad    = assignedWOs.length + tech.metrics.open_tasks;
     const capacity     = 6;
@@ -4960,7 +5164,7 @@ function getUnitRepairHistory(propId, unitNum){
   const isHighFloor = bld ? fl >= bld.stories-1 : fl >= 4;
 
   // WOs already in WORK_ORDERS for this unit
-  const realWOs = WORK_ORDERS.filter(w=>w.property===propId&&w.unit===unitNum).map(wo=>({
+  const realWOs = getWorkOrdersForUI().filter(w=>w.property===propId&&w.unit===unitNum).map(wo=>({
     date: wo.created?.substring?.(0,10) || '2026-04-01',
     wo: wo.id, category: wo.category, title: wo.title,
     status: wo.status, vendor: wo.vendor||'TBD', cost: wo.actual_cost||wo.est_cost||null,
@@ -5019,7 +5223,7 @@ renderBuildingUnits = function(b, p){
       const unitNum = `${fl}0${u}`.slice(-3);
       if(knownUnits[unitNum]) allUnits.push(knownUnits[unitNum]);
       else {
-        const tenant = TENANTS.find(t=>t.property===b.id&&t.unit===unitNum);
+        const tenant = getTenantsForUI().find(t=>t.property===b.id&&t.unit===unitNum);
         allUnits.push({
           id:'sim', property:b.id, unit:unitNum, floor:fl,
           sqft: fl<=2?920:fl<=4?1050:1150,
@@ -5042,8 +5246,8 @@ renderBuildingUnits = function(b, p){
   if(unitFilter==='Occupied') filteredUnits = allUnits.filter(u=>u.status==='Occupied');
   else if(unitFilter==='Vacant') filteredUnits = allUnits.filter(u=>u.status==='Vacant');
   else if(unitFilter==='Attention') filteredUnits = allUnits.filter(u=>{
-    const hasWO = WORK_ORDERS.some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
-    const isDelinq = TENANTS.find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
+    const hasWO = getWorkOrdersForUI().some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
+    const isDelinq = getTenantsForUI().find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
     return hasWO||isDelinq||u.status==='Vacant';
   });
 
@@ -5077,8 +5281,8 @@ renderBuildingUnits = function(b, p){
         <div style="font-size:10px;font-weight:700;color:var(--text3);width:40px;text-align:right;font-family:var(--font-mono)">FL ${fl}</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap">
           ${flUnits.map(u=>{
-            const hasWO = WORK_ORDERS.some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
-            const isDelinq = TENANTS.find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
+            const hasWO = getWorkOrdersForUI().some(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
+            const isDelinq = getTenantsForUI().find(t=>t.property===b.id&&t.unit===u.unit&&t.balance>0);
             const isExp = expandedUnit===u.unit;
             const color = u.status==='Vacant'?'var(--red)':hasWO||isDelinq?'var(--amber)':'var(--green)';
             const repairs = getUnitRepairHistory(b.id, u.unit);
@@ -5117,8 +5321,8 @@ ${expandedUnit ? renderExpandedUnit(b.id, expandedUnit, allUnits.find(u=>u.unit=
     <thead><tr><th>UNIT</th><th>FL</th><th>TYPE</th><th>SQFT</th><th>TENANT</th><th>RENT</th><th>MARKET</th><th>STATUS</th><th>OPEN WOs</th><th>REPAIR HIST</th><th></th></tr></thead>
     <tbody>
       ${filteredUnits.map(u=>{
-        const tenant = TENANTS.find(t=>t.property===b.id&&t.unit===u.unit);
-        const wos = WORK_ORDERS.filter(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
+        const tenant = getTenantsForUI().find(t=>t.property===b.id&&t.unit===u.unit);
+        const wos = getWorkOrdersForUI().filter(w=>w.property===b.id&&w.unit===u.unit&&!['Completed','Closed'].includes(w.status));
         const repairs = getUnitRepairHistory(b.id, u.unit);
         const repairCost = repairs.reduce((s,r)=>s+(r.cost||0),0);
         const isExp = expandedUnit===u.unit;
@@ -5151,10 +5355,10 @@ ${expandedUnit ? renderExpandedUnit(b.id, expandedUnit, allUnits.find(u=>u.unit=
 // ═══════════════════════════════════════════════════════════════════
 function renderExpandedUnit(propId, unitNum, u){
   if(!u) return '';
-  const tenant = TENANTS.find(t=>t.property===propId&&t.unit===unitNum);
+  const tenant = getTenantsForUI().find(t=>t.property===propId&&t.unit===unitNum);
   const tp = (window.TENANT_PROFILES||TENANT_PROFILES||{})[tenant?.id];
   const repairs = getUnitRepairHistory(propId, unitNum);
-  const activeWOs = WORK_ORDERS.filter(w=>w.property===propId&&w.unit===unitNum&&!['Completed','Closed'].includes(w.status));
+  const activeWOs = getWorkOrdersForUI().filter(w=>w.property===propId&&w.unit===unitNum&&!['Completed','Closed'].includes(w.status));
   const tHistory  = (window.TENANT_HISTORY||TENANT_HISTORY||{})[propId+'-'+unitNum]||[];
   const appliances = u.appliances||{};
   const repairCost = repairs.reduce((s,r)=>s+(r.cost||0),0);
@@ -5343,7 +5547,7 @@ function renderExpandedUnit(propId, unitNum, u){
   function updateBadge(){
     const b = document.getElementById('triage-badge');
     if(b){
-      const n = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
+      const n = getWorkOrdersForUI().filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
       b.textContent = n;
       b.style.background = n>3?'rgba(239,68,68,0.2)':'rgba(245,158,11,0.15)';
       b.style.color = n>3?'var(--red)':'var(--amber)';
@@ -5478,7 +5682,7 @@ function getTechCalendar(techId, date){
   return Object.entries(WO_SCHEDULE)
     .filter(([,s])=>s.techId===techId&&s.date===date)
     .map(([woId,s])=>{
-      const wo=WORK_ORDERS.find(w=>w.id===woId);
+      const wo=getWorkOrdersForUI().find(w=>w.id===woId);
       return {time:s.timeSlot||'TBD',wo:woId,task:wo?.title||woId,status:'Scheduled',prop:wo?.property,duration:null};
     });
 }
@@ -5499,7 +5703,7 @@ function confirmAssign(woId, techId, date, timeSlot, notes){
   const key = techId+'|'+date;
   if(!TECH_CALENDAR[key]) TECH_CALENDAR[key]=[];
   TECH_CALENDAR[key].push(woId);
-  const wo  = WORK_ORDERS.find(w=>w.id===woId);
+  const wo  = getWorkOrdersForUI().find(w=>w.id===woId);
   const tech= FIELD_TECHS.find(t=>t.id===techId);
   if(wo) wo.status='Dispatched';
   window._pendingAssign = null;
@@ -5525,7 +5729,7 @@ function unassignWO(woId){
 }
 
 function renderSchedulePanel(woId, techId){
-  const wo   = WORK_ORDERS.find(w=>w.id===woId);
+  const wo   = getWorkOrdersForUI().find(w=>w.id===woId);
   const tech = FIELD_TECHS.find(t=>t.id===techId);
   const date = window._scheduleDate || new Date().toISOString().slice(0,10);
   const slot = window._scheduleSlot;
@@ -5631,17 +5835,17 @@ function renderSchedulePanel(woId, techId){
 screens['wo-triage'] = () => {
   const pending      = window._pendingAssign;
   const selectedWoId = window._triageWO;
-  const selWO        = WORK_ORDERS.find(w=>w.id===selectedWoId);
+  const selWO        = getWorkOrdersForUI().find(w=>w.id===selectedWoId);
   const triageFilter = window._triageFilter||'Unassigned';
   const priOrder     = {Emergency:0,Urgent:1,High:2,Normal:3,Low:4,Preventive:5};
 
-  let queueWOs = [...WORK_ORDERS]
+  let queueWOs = [...getWorkOrdersForUI()]
     .filter(w=>!['Completed','Closed'].includes(w.status))
     .sort((a,b)=>(priOrder[a.priority]||9)-(priOrder[b.priority]||9));
   if(triageFilter==='Unassigned') queueWOs=queueWOs.filter(w=>!WO_ASSIGNMENTS[w.id]);
   else if(triageFilter==='Assigned') queueWOs=queueWOs.filter(w=>!!WO_ASSIGNMENTS[w.id]);
 
-  const unassignedCount = WORK_ORDERS.filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
+  const unassignedCount = getWorkOrdersForUI().filter(w=>!['Completed','Closed'].includes(w.status)&&!WO_ASSIGNMENTS[w.id]).length;
 
   return `
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
@@ -5704,7 +5908,7 @@ screens['wo-triage'] = () => {
           <div style="font-size:10px;color:var(--text3)">Needs Dispatch</div>
         </div>
         <div style="padding:10px 16px;background:var(--bg4);border-radius:8px;border:1px solid var(--border);text-align:center">
-          <div style="font-size:20px;font-weight:800;color:var(--amber);font-family:var(--font-display)">${WORK_ORDERS.filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length}</div>
+          <div style="font-size:20px;font-weight:800;color:var(--amber);font-family:var(--font-display)">${getWorkOrdersForUI().filter(w=>['Emergency','Urgent'].includes(w.priority)&&!['Completed','Closed'].includes(w.status)).length}</div>
           <div style="font-size:10px;color:var(--text3)">Emergency/Urgent</div>
         </div>
         <div style="padding:10px 16px;background:var(--bg4);border-radius:8px;border:1px solid var(--border);text-align:center">
@@ -5939,10 +6143,10 @@ function renderTriageTechRoster(selWO){
   const origRenderExpandedUnit = renderExpandedUnit;
   renderExpandedUnit = function(propId, unitNum, u){
     if(!u) return '';
-    const tenant = TENANTS.find(t=>t.property===propId&&t.unit===unitNum);
+    const tenant = getTenantsForUI().find(t=>t.property===propId&&t.unit===unitNum);
     const tp = (TENANT_PROFILES||{})[tenant?.id];
     const repairs = getUnitRepairHistory(propId, unitNum);
-    const activeWOs = WORK_ORDERS.filter(w=>w.property===propId&&w.unit===unitNum&&!['Completed','Closed'].includes(w.status));
+    const activeWOs = getWorkOrdersForUI().filter(w=>w.property===propId&&w.unit===unitNum&&!['Completed','Closed'].includes(w.status));
     const tHistory  = (TENANT_HISTORY||{})[propId+'-'+unitNum]||[];
     const appliances = u.appliances||{};
     const repairCost = repairs.reduce((s,r)=>s+(r.cost||0),0);
@@ -6178,18 +6382,19 @@ function setLandlord(id){
 }
 
 function filteredProps(){
-  if(window._activeLandlord === 'all') return PROPERTIES;
-  return PROPERTIES.filter(p => p.owner === window._activeLandlord);
+  const pl = getPropertiesForUI();
+  if(window._activeLandlord === 'all') return pl;
+  return pl.filter(p => p.owner === window._activeLandlord);
 }
 
 function filteredTenants(){
   const propIds = filteredProps().map(p => p.id);
-  return TENANTS.filter(t => propIds.includes(t.property));
+  return getTenantsForUI().filter(t => propIds.includes(t.property));
 }
 
 function filteredWOs(){
   const propIds = filteredProps().map(p => p.id);
-  return WORK_ORDERS.filter(w => propIds.includes(w.property));
+  return getWorkOrdersForUI().filter(w => propIds.includes(w.property));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -6201,12 +6406,13 @@ function filteredWOs(){
 //        Vacancy Pipeline, PM Overdue alert
 // ═══════════════════════════════════════════════════════════════════
 screens['portfolio-overview'] = () => {
+  loadDashboardOnce();
   const al       = window._activeLandlord || 'all';
   const landlord = LANDLORDS[al] || LANDLORDS['all'];
   const props    = filteredProps();
   const tenants  = filteredTenants();
   const wos      = filteredWOs();
-  const allOwners = [...new Set(PROPERTIES.map(p=>p.owner))].sort();
+  const allOwners = [...new Set(getPropertiesForUI().map(p=>p.owner))].sort();
 
   // ── Core metrics ──────────────────────────────────────────────
   const totalUnits   = props.reduce((s,p)=>s+p.units,0);
@@ -6237,7 +6443,7 @@ screens['portfolio-overview'] = () => {
 
   // ── COI blocked vendors ───────────────────────────────────────
   const coiBlocked = (typeof VENDOR_COI!=='undefined')
-    ? VENDORS.filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status))
+    ? getVendorsForUI().filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status))
     : [];
 
   // ── Upcoming critical dates (next 30 days) ────────────────────
@@ -6330,7 +6536,7 @@ screens['portfolio-overview'] = () => {
     text:dueSoonSchedules.length+' PM schedule'+(dueSoonSchedules.length>1?'s':'')+' due this week',
     btn:'View PM', screen:'pm-scheduler', section:'workorders', urgency:5
   });
-  const leaseExpiring = LEASES.filter(l=>props.some(p=>p.id===l.property)&&l.status==='Expiring 30 days'&&!l.renewal_offered);
+  const leaseExpiring = getLeasesForUI().filter(l=>props.some(p=>p.id===l.property)&&l.status==='Expiring 30 days'&&!l.renewal_offered);
   if(leaseExpiring.length>0) actions.push({
     color:'var(--amber)', icon:'📄',
     text:leaseExpiring.length+' lease'+(leaseExpiring.length>1?'s':'')+' expiring within 30 days — no renewal offer sent',
@@ -6350,10 +6556,10 @@ screens['portfolio-overview'] = () => {
   <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:0.07em;white-space:nowrap">Viewing:</div>
   <div style="position:relative;flex:0 0 auto">
     <select onchange="setLandlord(this.value)" style="padding:9px 36px 9px 12px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;background:var(--bg4);border:1px solid ${al==='all'?'var(--green)':'var(--border2)'};color:${al==='all'?'var(--green)':'var(--text)'};appearance:none;-webkit-appearance:none;min-width:220px">
-      <option value="all" ${al==='all'?'selected':''}>🏘 All Landlords — ${PROPERTIES.length} properties</option>
+      <option value="all" ${al==='all'?'selected':''}>🏘 All Landlords — ${getPropertiesForUI().length} properties</option>
       ${allOwners.map(owner=>{
         const ll=LANDLORDS[owner]||{};
-        const lProps=PROPERTIES.filter(p=>p.owner===owner);
+        const lProps=getPropertiesForUI().filter(p=>p.owner===owner);
         return `<option value="${owner}" ${al===owner?'selected':''}>${ll.initials||owner[0]} ${owner} — ${lProps.length} prop${lProps.length!==1?'s':''}`;
       }).join('')}
     </select>
@@ -6475,7 +6681,7 @@ ${emergency>0?`
           html+=`<div style="padding:6px 14px 4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:${priColor[pri]};background:rgba(255,255,255,0.01);border-bottom:1px solid rgba(30,45,68,0.3)">${pri} · ${group.length}</div>`;
           group.forEach(wo=>{
             const p=getProp(wo.property);
-            const vendor=VENDORS.find(v=>v.name===wo.vendor);
+            const vendor=getVendorsForUI().find(v=>v.name===wo.vendor);
             const coiOk = vendor ? !['expired','missing'].includes((typeof VENDOR_COI!=='undefined'?VENDOR_COI[vendor.id]:{})||{}.status) : true;
             html+=`<div onclick="window._triageWO='${wo.id}';navigate('wo-triage');switchSection('workorders')" style="padding:10px 14px;border-bottom:1px solid rgba(30,45,68,0.3);cursor:pointer;display:flex;align-items:flex-start;gap:10px" onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background=''">
               <div style="width:3px;flex-shrink:0;border-radius:2px;background:${priColor[pri]};align-self:stretch"></div>
@@ -6684,16 +6890,16 @@ ${emergency>0?`
           <span style="font-size:12px;font-weight:600;color:var(--green)">Connected — Last sync 47 min ago</span>
         </div>
         ${[
-          ['Properties synced', PROPERTIES.length],
-          ['Units synced',      PROPERTIES.reduce((s,p)=>s+p.units,0)],
-          ['Tenants synced',    TENANTS.length],
+          ['Properties synced', getPropertiesForUI().length],
+          ['Units synced',      getPropertiesForUI().reduce((s,p)=>s+p.units,0)],
+          ['Tenants synced',    getTenantsForUI().length],
           ['Pending push',      wos.filter(w=>w.status==='Submitted'&&!['Completed','Closed'].includes(w.status)).length],
         ].map(([l,v])=>`
         <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(30,45,68,0.3)">
           <span style="font-size:11px;color:var(--text3)">${l}</span>
           <span style="font-size:11px;font-weight:600;font-family:var(--font-mono)">${v}</span>
         </div>`).join('')}
-        <button class="btn btn-xs" style="width:100%;margin-top:10px" onclick="toast('↻ Sync triggered — pulling latest from Buildium...')">↻ Sync Now</button>
+        <button class="btn btn-xs" style="width:100%;margin-top:10px" onclick="triggerSync(true)">↻ Sync Now</button>
       </div>
     </div>
 
@@ -6786,7 +6992,7 @@ function pmCard(s){
   const cfg = PM_STATUS_CONFIG[s.status];
   const daysOverdue = s.next_due && s.status==='overdue' ? daysBetween(s.next_due, new Date().toISOString().slice(0,10)) : 0;
   const daysTil     = s.next_due && s.status!=='overdue' ? daysBetween(new Date().toISOString().slice(0,10), s.next_due) : 0;
-  const p = PROPERTIES.find(pr=>pr.id===s.property)||{};
+  const p = getPropertiesForUI().find(pr=>pr.id===s.property)||{};
 
   return `<div style="background:${cfg.bg};border:1px solid ${cfg.border};border-left:3px solid ${cfg.color};border-radius:10px;padding:12px 14px;margin-bottom:8px">
     <div style="display:flex;align-items:flex-start;gap:12px">
@@ -6854,13 +7060,13 @@ screens['pm-new'] = () => `
     <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Schedule Details</h3></div>
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Building System','select',['HVAC','Plumbing','Electrical','Elevator','Roof','Fire','Boiler','Geothermal','Pest','Landscaping','General'].map(s=>`<option>${s}</option>`).join('')],
         ['Task Name','text','e.g. Geothermal Filter Cleaning'],
         ['Repeat Every','select',['1 month','2 months','3 months','6 months','12 months','24 months','One-time'].map(i=>`<option>${i}</option>`).join('')],
         ['Last Completed','date',''],
         ['First Due Date','date',''],
-        ['Preferred Vendor','select',['— Unassigned —',...VENDORS.map(v=>`<option>${v.name}</option>`)].join('')],
+        ['Preferred Vendor','select',['— Unassigned —',...getVendorsForUI().map(v=>`<option>${v.name}</option>`)].join('')],
         ['Assign Tech','select',['— Unassigned —',...FIELD_TECHS.map(t=>`<option>${t.name}</option>`)].join('')],
         ['Estimated Cost ($)','number','0'],
         ['Estimated Hours','number','2'],
@@ -6917,8 +7123,8 @@ function coiStatusCfg(status){
 }
 
 screens['wo-vendors'] = () => {
-  const expired = VENDORS.filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status));
-  const expiring = VENDORS.filter(v=>VENDOR_COI[v.id]?.status==='expiring_soon');
+  const expired = getVendorsForUI().filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status));
+  const expiring = getVendorsForUI().filter(v=>VENDOR_COI[v.id]?.status==='expiring_soon');
 
   return `
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
@@ -6947,7 +7153,7 @@ ${expiring.length?`
 <table class="tbl">
   <thead><tr><th>VENDOR</th><th>SPECIALTY</th><th>COI STATUS</th><th>EXPIRY</th><th>COVERAGE</th><th>RATING</th><th>ACTIVE WOs</th><th>YTD SPEND</th><th></th></tr></thead>
   <tbody>
-    ${VENDORS.map(v=>{
+    ${getVendorsForUI().map(v=>{
       const coi = VENDOR_COI[v.id]||{status:'missing'};
       const cfg = coiStatusCfg(coi.status);
       const isBlocked = ['expired','missing'].includes(coi.status);
@@ -6982,7 +7188,7 @@ ${expiring.length?`
 
 screens['coi-tracker'] = () => {
   const groups = {valid:[],expiring_soon:[],expired:[],missing:[]};
-  VENDORS.forEach(v=>{ const s=(VENDOR_COI[v.id]||{status:'missing'}).status; (groups[s]||groups.missing).push(v); });
+  getVendorsForUI().forEach(v=>{ const s=(VENDOR_COI[v.id]||{status:'missing'}).status; (groups[s]||groups.missing).push(v); });
   return `
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
   <button class="btn btn-sm" onclick="navigate('wo-vendors')">← Vendors</button>
@@ -6993,7 +7199,7 @@ screens['coi-tracker'] = () => {
 </div>
 <div class="card">
   <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>All Vendors — Insurance Status</h3></div>
-  ${VENDORS.map(v=>{
+  ${getVendorsForUI().map(v=>{
     const coi=VENDOR_COI[v.id]||{status:'missing'};
     const cfg=coiStatusCfg(coi.status);
     const isBlocked=['expired','missing'].includes(coi.status);
@@ -7019,7 +7225,7 @@ screens['coi-tracker'] = () => {
 };
 
 function coiUpload(vid){ toast('📎 COI upload form — attach PDF or image'); }
-function coiRequest(vid){ const v=VENDORS.find(x=>x.id===vid); toast('📧 Renewal request emailed to '+v?.name); }
+function coiRequest(vid){ const v=getVendorsForUI().find(x=>x.id===vid); toast('📧 Renewal request emailed to '+v?.name); }
 function coiView(vid){ toast('📄 Opening COI document...'); }
 
 
@@ -7031,8 +7237,8 @@ let _nformType = 'N4';
 let _nformTenant = null;
 
 screens['n-forms'] = () => {
-  const selTenant = _nformTenant ? TENANTS.find(t=>t.id===_nformTenant) : null;
-  const selProp   = selTenant ? PROPERTIES.find(p=>p.id===selTenant.property) : null;
+  const selTenant = _nformTenant ? getTenantsForUI().find(t=>t.id===_nformTenant) : null;
+  const selProp   = selTenant ? getPropertiesForUI().find(p=>p.id===selTenant.property) : null;
 
   return `
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
@@ -7065,8 +7271,8 @@ screens['n-forms'] = () => {
     <div class="card">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Select Tenant</h3></div>
       <div style="padding:10px">
-        ${TENANTS.filter(t=>t.property&&t.property!=='P010').map(t=>{
-          const p=PROPERTIES.find(pr=>pr.id===t.property)||{};
+        ${getTenantsForUI().filter(t=>t.property&&t.property!=='P010').map(t=>{
+          const p=getPropertiesForUI().find(pr=>pr.id===t.property)||{};
           return `<div onclick="window._nformTenant='${t.id}';navigate('n-forms')" style="padding:8px 10px;border-radius:7px;margin-bottom:3px;cursor:pointer;background:${_nformTenant===t.id?'var(--green-dim)':'transparent'};border:1px solid ${_nformTenant===t.id?'rgba(0,200,150,0.3)':'transparent'}">
             <div style="font-size:12px;font-weight:600">${t.name}</div>
             <div style="font-size:10px;color:var(--text3)">${p.name} · Unit ${t.unit}</div>
@@ -7132,7 +7338,7 @@ function renderNForm(type, t, p){
 }
 
 function renderN4(t,p,today,deadline,ll,ll_addr,ll_ph){
-  const lease = LEASES.find(l=>l.property===p.id&&l.tenant===t.id)||{rent:t.rent};
+  const lease = getLeasesForUI().find(l=>l.property===p.id&&l.tenant===t.id)||{rent:t.rent};
   return `
 <div style="border:2px solid #000;padding:16px">
   <div style="text-align:center;margin-bottom:14px;border-bottom:2px solid #000;padding-bottom:10px">
@@ -7365,7 +7571,7 @@ screens['move-calendar'] = () => {
         <h3>Upcoming Turnovers</h3>
       </div>
       ${MOVE_EVENTS.sort((a,b)=>a.date.localeCompare(b.date)).map(e=>{
-        const p=PROPERTIES.find(pr=>pr.id===e.property)||{};
+        const p=getPropertiesForUI().find(pr=>pr.id===e.property)||{};
         const isSelected=window._calEvent===e.id;
         return `<div onclick="window._calEvent=window._calEvent==='${e.id}'?null:'${e.id}';navigate('move-calendar')" style="padding:10px 14px;border-bottom:1px solid rgba(30,45,68,0.4);cursor:pointer;background:${isSelected?'rgba(0,200,150,0.04)':''}">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">
@@ -7385,7 +7591,7 @@ screens['move-calendar'] = () => {
 
 function renderMoveEventDetail(e){
   if(!e) return '';
-  const p=PROPERTIES.find(pr=>pr.id===e.property)||{};
+  const p=getPropertiesForUI().find(pr=>pr.id===e.property)||{};
   const tech=e.tech?FIELD_TECHS.find(t=>t.id===e.tech):null;
   const typeColor=e.type==='move_out'?'var(--red)':e.type==='move_in'?'var(--green)':'var(--blue)';
   const typeLabel=e.type==='move_out'?'Move-Out':e.type==='move_in'?'Move-In':'Inspection';
@@ -7435,7 +7641,7 @@ screens['move-new'] = () => `
       ${[
         ['Event Type','select',['Move-Out','Move-In','Inspection','Elevator Booking'].map(t=>`<option>${t}</option>`).join('')],
         ['Date','date',''],
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Unit Number','text','e.g. 204'],
         ['Tenant / Person','text',''],
         ['Inspector','select',['Emma R.','Marcus L.','Ravi S.'].map(p=>`<option>${p}</option>`).join('')],
@@ -7853,7 +8059,7 @@ screens['insp-annual'] = () => {
         ${allUnits.filter(u=>!prog.units_done.includes(u)).map(u=>{
           const isSched=scheduledUnits.includes(u);
           const sched=SCHEDULED_INSPECTIONS.find(s=>s.property===pid&&s.unit===u);
-          const tenant=TENANTS.find(t=>t.property===pid&&t.unit===u);
+          const tenant=getTenantsForUI().find(t=>t.property===pid&&t.unit===u);
           return `<div style="padding:9px 14px;border-bottom:1px solid rgba(30,45,68,0.4);display:flex;align-items:center;gap:10px">
             <div style="font-family:var(--font-mono);font-weight:700;font-size:13px;color:${isSched?'var(--blue)':'var(--text)'}">${u}</div>
             <div style="flex:1">
@@ -7915,7 +8121,7 @@ function renderInspFormBody(roomFilter){
 
 function inspFormHeader(title, subtitle, propId, unit){
   const p = getProp(propId||window._inspProp||'P003');
-  const tenant = TENANTS.find(t=>t.property===p.id&&t.unit===(unit||window._inspUnit));
+  const tenant = getTenantsForUI().find(t=>t.property===p.id&&t.unit===(unit||window._inspUnit));
   const today = new Date().toLocaleDateString('en-CA',{year:'numeric',month:'long',day:'numeric'});
   return `
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
@@ -8020,7 +8226,7 @@ ${inspFormHeader('Move-In Inspection','Baseline condition report — tenant pres
 <div class="card" style="margin-bottom:10px">
   <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Tenant & Unit</h3></div>
   <div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
-    ${[['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+    ${[['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
        ['Unit Number','text','e.g. 204'],
        ['Tenant Name','text',''],
        ['Move-In Date','date',''],
@@ -8325,7 +8531,7 @@ screens['insp-new'] = () => `
     <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
       ${[
         ['Type','select',['Annual Unit','Move-In','Move-Out','Drive-By — Exterior','Drive-By — Seasonal (Spring)','Drive-By — Seasonal (Fall)'].map(t=>`<option>${t}</option>`).join('')],
-        ['Property','select',PROPERTIES.map(p=>`<option>${p.name}</option>`).join('')],
+        ['Property','select',getPropertiesForUI().map(p=>`<option>${p.name}</option>`).join('')],
         ['Unit','text','e.g. 204 (or "All" for building-wide)'],
         ['Date','date',''],
         ['Inspector','select',['Emma R.','Marcus L.','Ravi S.'].map(i=>`<option>${i}</option>`).join('')],
@@ -8421,7 +8627,7 @@ function getPendingBills(){
   // Check last 2 completed months + current
   for(let m=month-2; m<=month; m++){
     if(m<1) continue;
-    PROPERTIES.filter(p=>PROP_UTILITIES[p.id]).forEach(p=>{
+    getPropertiesForUI().filter(p=>PROP_UTILITIES[p.id]).forEach(p=>{
       if(isPendingMonth(p.id, year, m)){
         const d = new Date(year, m-1, 1);
         pending.push({
@@ -8485,7 +8691,7 @@ const BILL_UPLOADS = {};
 function getActiveOwnerProps(){
   const cfg = BILL_OWNER_CONFIG[window._billOwner];
   if(!cfg || !cfg.active) return [];
-  return PROPERTIES.filter(p=>cfg.props.includes(p.id) && PROP_UTILITIES[p.id]);
+  return getPropertiesForUI().filter(p=>cfg.props.includes(p.id) && PROP_UTILITIES[p.id]);
 }
 
 screens['opex-bill-entry'] = () => {
@@ -8826,11 +9032,11 @@ function saveBills(propId, year, month){
 // ═══════════════════════════════════════════════════════════════════
 screens['admin-housekeeping'] = () => {
   const pending  = getPendingBills();
-  const coiExp   = (typeof VENDOR_COI!=='undefined') ? VENDORS.filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status)) : [];
-  const coiSoon  = (typeof VENDOR_COI!=='undefined') ? VENDORS.filter(v=>VENDOR_COI[v.id]?.status==='expiring_soon') : [];
+  const coiExp   = (typeof VENDOR_COI!=='undefined') ? getVendorsForUI().filter(v=>['expired','missing'].includes(VENDOR_COI[v.id]?.status)) : [];
+  const coiSoon  = (typeof VENDOR_COI!=='undefined') ? getVendorsForUI().filter(v=>VENDOR_COI[v.id]?.status==='expiring_soon') : [];
   const pmOver   = (typeof PM_SCHEDULES!=='undefined') ? PM_SCHEDULES.filter(s=>s.status==='overdue') : [];
-  const delinq   = TENANTS.filter(t=>t.balance>0);
-  const leaseExp = LEASES.filter(l=>['Expiring 30 days','Month-to-Month'].includes(l.status)&&!l.renewal_offered);
+  const delinq   = getTenantsForUI().filter(t=>t.balance>0);
+  const leaseExp = getLeasesForUI().filter(l=>['Expiring 30 days','Month-to-Month'].includes(l.status)&&!l.renewal_offered);
   const insp90   = (typeof SCHEDULED_INSPECTIONS!=='undefined') ? SCHEDULED_INSPECTIONS.filter(s=>s.date>=new Date().toISOString().slice(0,10)) : [];
 
   const allClear = pending.length===0&&coiExp.length===0&&pmOver.length===0;

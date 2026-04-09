@@ -4,11 +4,13 @@ Adds: bill push · lease notes · WO notes · vendor updates · webhook support
 Replaces client.py — use this file.
 """
 
+import os
 import httpx
+from buildium.client import parse_buildium_ts, parse_buildium_date
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ class BuildiumRateLimitError(BuildiumAPIError):
 
 class BuildiumClient:
     """
-    Async Buildium API client. Handles OAuth, rate limiting, pagination, retry.
+    Async Buildium API client. API key headers, rate limiting, pagination, retry.
 
     Usage:
         async with BuildiumClient(client_id, client_secret) as client:
@@ -35,48 +37,34 @@ class BuildiumClient:
             await client.push_work_order(wo_dict)
     """
 
-    BASE_URL  = "https://api.buildium.com/v1"
-    AUTH_URL  = "https://auth.buildium.com/oauth/token"
-    TOKEN_BUFFER_SEC = 60  # Refresh token 60s before expiry
-
-    def __init__(self, client_id: str, client_secret: str, page_size: int = 100):
+    def __init__(self, client_id: str, client_secret: str, page_size: int = 100, base_url: Optional[str] = None):
         self.client_id     = client_id
         self.client_secret = client_secret
         self.page_size     = page_size
-        self._token: Optional[str] = None
-        self._token_expires: Optional[datetime] = None
+        raw = (base_url if base_url is not None else os.getenv("BUILDIUM_API_BASE_URL", "https://api.buildium.com/v1")).strip()
+        self.base_url = raw.rstrip("/") if raw else "https://api.buildium.com/v1"
         self._req_count    = 0
         self._window_start = time.time()
         self._http: Optional[httpx.AsyncClient] = None
 
     async def __aenter__(self):
         self._http = httpx.AsyncClient(timeout=30.0)
-        await self.authenticate()
+        logger.info("Buildium API client ready (header auth) base=%s", self.base_url)
         return self
 
     async def __aexit__(self, *args):
         if self._http:
             await self._http.aclose()
 
-    # ── Auth ───────────────────────────────────────────────────────
-    async def authenticate(self):
-        logger.info("Authenticating with Buildium...")
-        resp = await self._http.post(self.AUTH_URL, data={
-            "grant_type":    "client_credentials",
-            "client_id":     self.client_id,
-            "client_secret": self.client_secret,
-            "scope":         "urn:buildium:apis:all",
-        })
-        if resp.status_code != 200:
-            raise BuildiumAPIError(resp.status_code, "Auth failed", {})
-        data = resp.json()
-        self._token = data["access_token"]
-        self._token_expires = datetime.utcnow() + timedelta(seconds=data["expires_in"] - self.TOKEN_BUFFER_SEC)
-        logger.info(f"Buildium auth OK. Expires {self._token_expires.isoformat()}")
-
-    async def _ensure_token(self):
-        if not self._token or datetime.utcnow() >= self._token_expires:
-            await self.authenticate()
+    def _auth_headers(self, json_body: bool = False) -> dict:
+        h = {
+            "x-buildium-client-id": self.client_id,
+            "x-buildium-client-secret": self.client_secret,
+            "Accept": "application/json",
+        }
+        if json_body:
+            h["Content-Type"] = "application/json"
+        return h
 
     # ── Rate limiting (90/min — Buildium limit is 100) ─────────────
     async def _rate_limit(self):
@@ -95,12 +83,10 @@ class BuildiumClient:
 
     # ── Core HTTP ──────────────────────────────────────────────────
     async def _request(self, method: str, path: str, **kwargs) -> dict | list:
-        await self._ensure_token()
         await self._rate_limit()
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
-        if method in ("POST","PATCH","PUT"):
-            headers["Content-Type"] = "application/json"
-        url = f"{self.BASE_URL}{path}"
+        json_body = method in ("POST", "PATCH", "PUT")
+        headers = self._auth_headers(json_body=json_body)
+        url = f"{self.base_url}{path}"
         for attempt in range(3):
             try:
                 resp = await self._http.request(method, url, headers=headers, **kwargs)
@@ -110,9 +96,7 @@ class BuildiumClient:
                     await asyncio.sleep(wait)
                     continue
                 if resp.status_code == 401:
-                    await self.authenticate()
-                    headers["Authorization"] = f"Bearer {self._token}"
-                    continue
+                    raise BuildiumAPIError(resp.status_code, resp.text[:500], {})
                 if resp.status_code in (204,):           # No content
                     return {}
                 if resp.status_code >= 400:
@@ -131,6 +115,9 @@ class BuildiumClient:
 
     async def _patch(self, path: str, body: dict) -> dict:
         return await self._request("PATCH", path, json=body)
+
+    async def _put(self, path: str, body: dict) -> dict:
+        return await self._request("PUT", path, json=body)
 
     async def _get_all(self, path: str, params: dict = None) -> list:
         all_results, offset = [], 0
@@ -174,8 +161,8 @@ class BuildiumClient:
             "year_built":           r.get("YearBuilt"),
             "reserve_fund":         r.get("ReserveFundAmount"),
             "is_active":            r.get("IsActive", True),
-            "buildium_created_at":  r.get("CreatedDateTime"),
-            "buildium_updated_at":  r.get("UpdatedDateTime"),
+            "buildium_created_at":  parse_buildium_ts(r.get("CreatedDateTime")),
+            "buildium_updated_at":  parse_buildium_ts(r.get("UpdatedDateTime")),
         }
 
     async def get_units(self, property_bid: int = None) -> list[dict]:
@@ -194,7 +181,7 @@ class BuildiumClient:
             "sqft":                  r.get("Area"),
             "market_rent":           r.get("MarketRent"),
             "is_active":             r.get("IsActive", True),
-            "buildium_updated_at":   r.get("UpdatedDateTime"),
+            "buildium_updated_at":   parse_buildium_ts(r.get("UpdatedDateTime")),
             "_property_buildium_id": prop.get("Id") if isinstance(prop, dict) else r.get("PropertyId"),
         }
 
@@ -215,7 +202,7 @@ class BuildiumClient:
         }
 
     async def get_tenants(self) -> list[dict]:
-        return [self._norm_tenant(t) for t in await self._get_all("/leases/residents")]
+        return [self._norm_tenant(t) for t in await self._get_all("/leases/tenants")]
 
     def _norm_tenant(self, r: dict) -> dict:
         phones = r.get("PhoneNumbers", [])
@@ -225,10 +212,10 @@ class BuildiumClient:
             "last_name":           r.get("LastName", ""),
             "email":               r.get("Email"),
             "phone":               next((p.get("Number") for p in phones if p.get("IsPrimary")), None),
-            "date_of_birth":       r.get("DateOfBirth"),
+            "date_of_birth":       parse_buildium_date(r.get("DateOfBirth")),
             "company":             r.get("Company"),
             "is_active":           r.get("IsActive", True),
-            "buildium_created_at": r.get("CreatedDateTime"),
+            "buildium_created_at": parse_buildium_ts(r.get("CreatedDateTime")),
         }
 
     async def get_leases(self, statuses: list = None, since: datetime = None) -> list[dict]:
@@ -245,12 +232,12 @@ class BuildiumClient:
             "lease_status":          r.get("LeaseStatus"),
             "rent_amount":           r.get("Rent"),
             "security_deposit":      r.get("SecurityDeposit"),
-            "start_date":            r.get("StartDate"),
-            "end_date":              r.get("EndDate"),
-            "move_in_date":          r.get("MoveInDate"),
-            "move_out_date":         r.get("MoveOutDate"),
+            "start_date":            parse_buildium_date(r.get("StartDate")),
+            "end_date":              parse_buildium_date(r.get("EndDate")),
+            "move_in_date":          parse_buildium_date(r.get("MoveInDate")),
+            "move_out_date":         parse_buildium_date(r.get("MoveOutDate")),
             "is_active":             r.get("LeaseStatus") == "Active",
-            "buildium_updated_at":   r.get("UpdatedDateTime"),
+            "buildium_updated_at":   parse_buildium_ts(r.get("UpdatedDateTime")),
             "_unit_buildium_id":     unit.get("Id") if isinstance(unit, dict) else None,
             "_residents":            r.get("LeaseResidents", []),
         }
@@ -269,7 +256,7 @@ class BuildiumClient:
             "buildium_id":        r.get("Id"),
             "payment_type":       r.get("Type"),
             "amount":             r.get("TotalAmount"),
-            "payment_date":       r.get("Date"),
+            "payment_date":       parse_buildium_date(r.get("Date")),
             "memo":               r.get("Memo"),
             "is_voided":          r.get("IsVoided", False),
             "_lease_buildium_id": lease_bid,
@@ -295,19 +282,41 @@ class BuildiumClient:
 
     async def get_maintenance_requests(self, statuses: list = None, since: datetime = None) -> list[dict]:
         params = {}
-        if statuses: params["statuses"] = ",".join(statuses)
-        if since:    params["lastupdatedfrom"] = since.isoformat()
-        raw = await self._get_all("/tasks/maintenancerequests", params)
-        return [self._norm_wo(w) for w in raw]
+        if statuses:
+            params["statuses"] = ",".join(statuses)
+        if since:
+            params["lastupdatedfrom"] = since.strftime("%Y-%m-%d")
+        all_results = []
+        offset = 0
+        while True:
+            batch = dict(params)
+            batch["offset"] = offset
+            batch["limit"] = self.page_size
+            data = await self._get("/tasks/residentrequests", batch)
+            items = data if isinstance(data, list) else (data.get("results") or [])
+            if not items:
+                break
+            all_results.extend(items)
+            if len(items) < self.page_size:
+                break
+            offset += self.page_size
+        return [self._norm_wo(w) for w in all_results]
 
     def _norm_wo(self, r: dict) -> dict:
+        tid = r.get("Id")
+        if tid is None:
+            tid = r.get("id")
+        tst = r.get("TaskStatus") or r.get("task_status")
+        uid = r.get("UnitId")
+        if uid is None:
+            uid = r.get("unit_id")
         return {
-            "buildium_task_id": r.get("Id"),
-            "title":            r.get("Title", ""),
-            "description":      r.get("Description"),
-            "status":           self._status_from_buildium(r.get("TaskStatus")),
-            "scheduled_date":   r.get("DueDate"),
-            "_unit_buildium_id": r.get("UnitId"),
+            "buildium_task_id": tid,
+            "title":            r.get("Title") or r.get("title") or "",
+            "description":      r.get("Description") or r.get("description"),
+            "status":           self._status_from_buildium(tst),
+            "scheduled_date":   r.get("DueDate") or r.get("due_date"),
+            "_unit_buildium_id": uid,
         }
 
     def _status_from_buildium(self, s: str) -> str:
@@ -348,12 +357,12 @@ class BuildiumClient:
             body["UnitId"] = wo["_unit_buildium_id"]
         if wo.get("scheduled_date"):
             body["DueDate"] = str(wo["scheduled_date"])
-        return await self._post("/tasks/maintenancerequests", body)
+        return await self._post("/tasks/residentrequests", body)
 
     async def update_wo_status(self, buildium_task_id: int, status: str) -> dict:
         """Push a status change to a Buildium maintenance request."""
         body = {"TaskStatus": self._status_to_buildium(status)}
-        return await self._patch(f"/tasks/maintenancerequests/{buildium_task_id}", body)
+        return await self._put(f"/tasks/residentrequests/{buildium_task_id}", body)
 
     async def add_wo_note(self, buildium_task_id: int, note: str, is_private: bool = True) -> dict:
         """
@@ -361,7 +370,7 @@ class BuildiumClient:
         Use for: tech assignment confirmation, dispatch notes, status updates.
         is_private=True means the note is internal — not visible to tenant via Buildium portal.
         """
-        return await self._post(f"/tasks/maintenancerequests/{buildium_task_id}/notes", {
+        return await self._post(f"/tasks/residentrequests/{buildium_task_id}/notes", {
             "Note":      note,
             "IsPrivate": is_private,
         })

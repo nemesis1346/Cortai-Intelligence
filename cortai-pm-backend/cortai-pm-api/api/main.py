@@ -17,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncpg
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-
 load_dotenv()
 
 from api.schema import SCHEMA
@@ -29,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────
 DATABASE_URL      = os.getenv("DATABASE_URL", "postgresql://cortai:changethis@localhost:5432/cortai_pm")
-BUILDIUM_CLIENT_ID     = os.getenv("BUILDIUM_CLIENT_ID", "97bd3408-e97f-4c66-9e43-fb8d70f11453")
-BUILDIUM_CLIENT_SECRET = os.getenv("BUILDIUM_CLIENT_SECRET", "/aSnihykBkjMvHZouL0bXphASW9XwpHcWZ1x384ktlY=")
+BUILDIUM_CLIENT_ID     = os.getenv("BUILDIUM_CLIENT_ID", "")
+BUILDIUM_CLIENT_SECRET = os.getenv("BUILDIUM_CLIENT_SECRET", "")
 
 db_pool: asyncpg.Pool = None
 
@@ -41,7 +40,7 @@ async def lifespan(app: FastAPI):
     global db_pool
     logger.info("Starting COrtai PM API...")
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=3, max_size=20)
-    
+
     # Apply schema
     async with db_pool.acquire() as conn:
         await conn.execute(SCHEMA)
@@ -504,9 +503,10 @@ async def list_tenants(
 ):
     sql = """
         SELECT t.*,
+               p.id as property_ref_id,
                p.name as property_name,
                u.unit_number,
-               l.rent_amount, l.end_date, l.lease_status,
+               l.rent_amount, l.start_date as lease_start, l.end_date, l.lease_status,
                ob.total_balance as arrears
         FROM tenants t
         LEFT JOIN lease_residents lr ON lr.tenant_id=t.id AND lr.is_primary=TRUE
@@ -793,6 +793,7 @@ async def expiring_leases(days: int = 90):
         rows = await conn.fetch("""
             SELECT l.*,
                    u.unit_number, p.name as property_name,
+                   t.id as primary_tenant_id, p.id as primary_property_id,
                    t.first_name||' '||t.last_name as tenant_name,
                    ob.total_balance as arrears
             FROM leases l

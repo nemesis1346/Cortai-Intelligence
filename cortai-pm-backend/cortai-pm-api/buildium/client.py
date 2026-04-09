@@ -1,22 +1,51 @@
 """
 buildium_client.py — Buildium REST API Client
-OAuth2 Client Credentials · Rate limiting · Retry logic · Full field mapping
+API key headers · Rate limiting · Retry logic · Full field mapping
 
 Buildium API docs: https://developer.buildium.com/
-Auth: POST https://auth.buildium.com/oauth/token (client_credentials)
-Base: https://api.buildium.com/v1
+Auth: x-buildium-client-id and x-buildium-client-secret headers per request
+Base: BUILDIUM_API_BASE_URL or https://api.buildium.com/v1 (use apisandbox.buildium.com for sandbox keys)
 Rate limit: 100 requests/min per client
 """
 
+import os
 import httpx
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, date
 from typing import Optional, Any
 from functools import wraps
 
 logger = logging.getLogger(__name__)
+
+
+def parse_buildium_ts(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    s = str(val).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
+def parse_buildium_date(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    s = str(val).strip()
+    if not s:
+        return None
+    if "T" in s:
+        return parse_buildium_ts(s).date()
+    return date.fromisoformat(s[:10])
 
 
 class BuildiumAPIError(Exception):
@@ -36,60 +65,40 @@ class BuildiumClient:
     Async Buildium API client.
 
     Usage:
-        client = BuildiumClient(client_id="...", client_secret="...")
-        await client.authenticate()
-        properties = await client.get_properties()
+        async with BuildiumClient(client_id="...", client_secret="...") as client:
+            properties = await client.get_properties()
 
     All methods return normalized dicts ready to insert into COrtai DB.
     """
 
-    BASE_URL = "https://api.buildium.com/v1"
-    AUTH_URL = "https://auth.buildium.com/oauth/token"
-    TOKEN_EXPIRY_BUFFER = 60  # Refresh token 60s before expiry
-
-    def __init__(self, client_id: str, client_secret: str, page_size: int = 100):
+    def __init__(self, client_id: str, client_secret: str, page_size: int = 100, base_url: Optional[str] = None):
         self.client_id = client_id
         self.client_secret = client_secret
         self.page_size = page_size
-        self._token: Optional[str] = None
-        self._token_expires_at: Optional[datetime] = None
+        raw = (base_url if base_url is not None else os.getenv("BUILDIUM_API_BASE_URL", "https://api.buildium.com/v1")).strip()
+        self.base_url = raw.rstrip("/") if raw else "https://api.buildium.com/v1"
         self._request_count = 0
         self._window_start = time.time()
         self._http: Optional[httpx.AsyncClient] = None
 
     async def __aenter__(self):
         self._http = httpx.AsyncClient(timeout=30.0)
-        await self.authenticate()
+        logger.info("Buildium API client ready (header auth) base=%s", self.base_url)
         return self
 
     async def __aexit__(self, *args):
         if self._http:
             await self._http.aclose()
 
-    # ── Authentication ──────────────────────────────────────────────
-    async def authenticate(self):
-        """Obtain OAuth2 client_credentials token from Buildium."""
-        logger.info("Authenticating with Buildium API...")
-        resp = await self._http.post(
-            self.AUTH_URL,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "scope": "urn:buildium:apis:all",
-            },
-        )
-        if resp.status_code != 200:
-            raise BuildiumAPIError(resp.status_code, "Authentication failed", resp.json())
-
-        data = resp.json()
-        self._token = data["access_token"]
-        self._token_expires_at = datetime.utcnow() + timedelta(seconds=data["expires_in"] - self.TOKEN_EXPIRY_BUFFER)
-        logger.info(f"Buildium auth OK. Token expires {self._token_expires_at.isoformat()}")
-
-    async def _ensure_token(self):
-        if not self._token or datetime.utcnow() >= self._token_expires_at:
-            await self.authenticate()
+    def _auth_headers(self, json_body: bool = False) -> dict:
+        h = {
+            "x-buildium-client-id": self.client_id,
+            "x-buildium-client-secret": self.client_secret,
+            "Accept": "application/json",
+        }
+        if json_body:
+            h["Content-Type"] = "application/json"
+        return h
 
     # ── Rate limiting ───────────────────────────────────────────────
     async def _rate_limit(self):
@@ -109,11 +118,10 @@ class BuildiumClient:
 
     # ── Core request ────────────────────────────────────────────────
     async def _get(self, path: str, params: dict = None) -> dict | list:
-        await self._ensure_token()
         await self._rate_limit()
 
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
-        url = f"{self.BASE_URL}{path}"
+        headers = self._auth_headers()
+        url = f"{self.base_url}{path}"
 
         for attempt in range(3):
             try:
@@ -124,8 +132,7 @@ class BuildiumClient:
                     await asyncio.sleep(wait)
                     continue
                 if resp.status_code == 401:
-                    await self.authenticate()
-                    continue
+                    raise BuildiumAPIError(resp.status_code, resp.text, {})
                 if resp.status_code >= 400:
                     raise BuildiumAPIError(resp.status_code, resp.text, {})
                 return resp.json()
@@ -135,19 +142,25 @@ class BuildiumClient:
                 await asyncio.sleep(2 ** attempt)
 
     async def _post(self, path: str, body: dict) -> dict:
-        await self._ensure_token()
         await self._rate_limit()
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
-        resp = await self._http.post(f"{self.BASE_URL}{path}", headers=headers, json=body)
+        headers = self._auth_headers(json_body=True)
+        resp = await self._http.post(f"{self.base_url}{path}", headers=headers, json=body)
         if resp.status_code >= 400:
             raise BuildiumAPIError(resp.status_code, resp.text, {})
         return resp.json()
 
     async def _patch(self, path: str, body: dict) -> dict:
-        await self._ensure_token()
         await self._rate_limit()
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
-        resp = await self._http.patch(f"{self.BASE_URL}{path}", headers=headers, json=body)
+        headers = self._auth_headers(json_body=True)
+        resp = await self._http.patch(f"{self.base_url}{path}", headers=headers, json=body)
+        if resp.status_code >= 400:
+            raise BuildiumAPIError(resp.status_code, resp.text, {})
+        return resp.json()
+
+    async def _put(self, path: str, body: dict) -> dict:
+        await self._rate_limit()
+        headers = self._auth_headers(json_body=True)
+        resp = await self._http.put(f"{self.base_url}{path}", headers=headers, json=body)
         if resp.status_code >= 400:
             raise BuildiumAPIError(resp.status_code, resp.text, {})
         return resp.json()
@@ -206,8 +219,8 @@ class BuildiumClient:
             "year_built":           raw.get("YearBuilt"),
             "reserve_fund":         raw.get("ReserveFundAmount"),
             "is_active":            raw.get("IsActive", True),
-            "buildium_created_at":  raw.get("CreatedDateTime"),
-            "buildium_updated_at":  raw.get("UpdatedDateTime"),
+            "buildium_created_at":  parse_buildium_ts(raw.get("CreatedDateTime")),
+            "buildium_updated_at":  parse_buildium_ts(raw.get("UpdatedDateTime")),
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -232,7 +245,7 @@ class BuildiumClient:
             "sqft":             raw.get("Area"),
             "market_rent":      raw.get("MarketRent"),
             "is_active":        raw.get("IsActive", True),
-            "buildium_updated_at": raw.get("UpdatedDateTime"),
+            "buildium_updated_at": parse_buildium_ts(raw.get("UpdatedDateTime")),
             # property_id populated by sync engine via FK lookup
             "_property_buildium_id": raw.get("Property", {}).get("Id") if isinstance(raw.get("Property"), dict) else raw.get("PropertyId"),
         }
@@ -260,11 +273,11 @@ class BuildiumClient:
     # TENANTS / RESIDENTS
     # ══════════════════════════════════════════════════════════════════
     async def get_tenants(self) -> list[dict]:
-        raw = await self._get_all("/leases/residents")
+        raw = await self._get_all("/leases/tenants")
         return [self._normalize_tenant(t) for t in raw]
 
     async def get_tenant(self, buildium_id: int) -> dict:
-        raw = await self._get(f"/leases/residents/{buildium_id}")
+        raw = await self._get(f"/leases/tenants/{buildium_id}")
         return self._normalize_tenant(raw)
 
     def _normalize_tenant(self, raw: dict) -> dict:
@@ -276,10 +289,10 @@ class BuildiumClient:
             "last_name":    raw.get("LastName", ""),
             "email":        raw.get("Email"),
             "phone":        primary_phone,
-            "date_of_birth": raw.get("DateOfBirth"),
+            "date_of_birth": parse_buildium_date(raw.get("DateOfBirth")),
             "company":      raw.get("Company"),
             "is_active":    raw.get("IsActive", True),
-            "buildium_created_at": raw.get("CreatedDateTime"),
+            "buildium_created_at": parse_buildium_ts(raw.get("CreatedDateTime")),
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -303,14 +316,14 @@ class BuildiumClient:
             "lease_status":     raw.get("LeaseStatus"),
             "rent_amount":      raw.get("Rent"),
             "security_deposit": raw.get("SecurityDeposit"),
-            "start_date":       raw.get("StartDate"),
-            "end_date":         raw.get("EndDate"),
-            "move_in_date":     raw.get("MoveInDate"),
-            "move_out_date":    raw.get("MoveOutDate"),
+            "start_date":       parse_buildium_date(raw.get("StartDate")),
+            "end_date":         parse_buildium_date(raw.get("EndDate")),
+            "move_in_date":     parse_buildium_date(raw.get("MoveInDate")),
+            "move_out_date":    parse_buildium_date(raw.get("MoveOutDate")),
             "is_active":        raw.get("LeaseStatus") == "Active",
             "_unit_buildium_id": raw.get("Unit", {}).get("Id") if isinstance(raw.get("Unit"), dict) else None,
             "_residents":       raw.get("LeaseResidents", []),
-            "buildium_updated_at": raw.get("UpdatedDateTime"),
+            "buildium_updated_at": parse_buildium_ts(raw.get("UpdatedDateTime")),
         }
 
     # ══════════════════════════════════════════════════════════════════
@@ -321,9 +334,22 @@ class BuildiumClient:
         if statuses:
             params["statuses"] = ",".join(statuses)
         if since:
-            params["lastupdatedfrom"] = since.isoformat()
-        raw = await self._get_all("/tasks/maintenancerequests", params)
-        return [self._normalize_wo(w) for w in raw]
+            params["lastupdatedfrom"] = since.strftime("%Y-%m-%d")
+        all_results = []
+        offset = 0
+        while True:
+            batch = dict(params)
+            batch["offset"] = offset
+            batch["limit"] = self.page_size
+            data = await self._get("/tasks/residentrequests", batch)
+            items = data if isinstance(data, list) else (data.get("results") or [])
+            if not items:
+                break
+            all_results.extend(items)
+            if len(items) < self.page_size:
+                break
+            offset += self.page_size
+        return [self._normalize_wo(w) for w in all_results]
 
     async def push_work_order(self, wo: dict) -> dict:
         """Create a new work order in Buildium."""
@@ -335,24 +361,31 @@ class BuildiumClient:
             "UnitId": wo.get("_unit_buildium_id"),
             "DueDate": wo.get("scheduled_date"),
         }
-        result = await self._post("/tasks/maintenancerequests", {k: v for k, v in body.items() if v is not None})
+        result = await self._post("/tasks/residentrequests", {k: v for k, v in body.items() if v is not None})
         return result
 
     async def update_work_order_status(self, buildium_task_id: int, status: str, notes: str = None) -> dict:
-        body = {"Status": self._map_status_to_buildium(status)}
+        body = {"TaskStatus": self._map_status_to_buildium(status)}
         if notes:
-            body["Note"] = {"Text": notes, "IsPrivate": True}
-        return await self._patch(f"/tasks/maintenancerequests/{buildium_task_id}", body)
+            body["Message"] = notes
+        return await self._put(f"/tasks/residentrequests/{buildium_task_id}", body)
 
     def _normalize_wo(self, raw: dict) -> dict:
+        tid = raw.get("Id")
+        if tid is None:
+            tid = raw.get("id")
+        tst = raw.get("TaskStatus") or raw.get("task_status")
+        uid = raw.get("UnitId")
+        if uid is None:
+            uid = raw.get("unit_id")
         return {
-            "buildium_task_id": raw.get("Id"),
-            "title":            raw.get("Title", ""),
-            "description":      raw.get("Description"),
-            "status":           self._map_status_from_buildium(raw.get("TaskStatus")),
-            "_unit_buildium_id": raw.get("UnitId"),
+            "buildium_task_id": tid,
+            "title":            raw.get("Title") or raw.get("title") or "",
+            "description":      raw.get("Description") or raw.get("description"),
+            "status":           self._map_status_from_buildium(tst),
+            "_unit_buildium_id": uid,
             "submitted_source": "Buildium",
-            "buildium_synced_at": datetime.utcnow().isoformat(),
+            "buildium_synced_at": datetime.utcnow(),
         }
 
     def _map_priority_to_buildium(self, priority: str) -> str:
@@ -387,7 +420,7 @@ class BuildiumClient:
             "buildium_id":      raw.get("Id"),
             "payment_type":     raw.get("Type"),
             "amount":           raw.get("TotalAmount"),
-            "payment_date":     raw.get("Date"),
+            "payment_date":     parse_buildium_date(raw.get("Date")),
             "memo":             raw.get("Memo"),
             "is_voided":        raw.get("IsVoided", False),
             "_lease_buildium_id": lease_buildium_id,

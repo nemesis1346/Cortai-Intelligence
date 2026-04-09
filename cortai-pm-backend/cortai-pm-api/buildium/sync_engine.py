@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 import asyncpg
-from buildium.client import BuildiumClient, BuildiumAPIError
+from buildium.client import BuildiumClient, BuildiumAPIError, parse_buildium_date
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +225,8 @@ class SyncEngine:
                             VALUES ($1,$2,$3,$4,$5,$6)
                             ON CONFLICT (buildium_id) DO UPDATE SET last_synced_at=NOW()
                         """, res.get("Id"), lease_id, tenant_id,
-                            res.get("IsPrimary", True), res.get("MoveInDate"), res.get("MoveOutDate"))
+                            res.get("IsPrimary", True), parse_buildium_date(res.get("MoveInDate")),
+                            parse_buildium_date(res.get("MoveOutDate")))
 
         await self._log_sync("full","leases",None,"pull","success",len(leases),created,updated,skipped,int((time.time()-t)*1000))
         logger.info(f"  Leases: {len(leases)} total · {created} new · {updated} updated")
@@ -245,7 +246,9 @@ class SyncEngine:
                     INSERT INTO outstanding_balances (buildium_id,lease_id,tenant_id,total_balance,as_of_date)
                     VALUES ($1,$2,$3,$4,$5)
                     ON CONFLICT (buildium_id) DO UPDATE
-                        SET total_balance=$3, as_of_date=$4, last_synced_at=NOW()
+                        SET lease_id=EXCLUDED.lease_id, tenant_id=EXCLUDED.tenant_id,
+                            total_balance=EXCLUDED.total_balance, as_of_date=EXCLUDED.as_of_date,
+                            last_synced_at=NOW()
                 """, bal.get("Id"), lease_id, tenant_id,
                     bal.get("TotalBalance",0), datetime.utcnow().date())
         logger.info(f"  Outstanding Balances: {len(balances)} synced")
