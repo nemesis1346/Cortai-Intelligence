@@ -700,13 +700,14 @@ function switchSection(sec){
 function navigate(screen, el){
   _lastScreen = screen;
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
-  if(el) el.classList.add('active');
+  const navEl = el && el.nodeType === 1 ? el : null;
+  if(navEl) navEl.classList.add('active');
   const content = screens[screen];
   document.getElementById('content-area').innerHTML = content
     ? content()
     : `<div style="padding:40px;text-align:center;color:var(--text3);font-family:var(--font-display)">${screen} — coming soon</div>`;
   document.getElementById('topbar-title').textContent =
-    el ? el.textContent.trim() : screen.replace(/-/g,' ');
+    navEl ? navEl.textContent.trim() : screen.replace(/-/g,' ');
   document.getElementById('content-area').scrollTop=0;
 }
 
@@ -808,6 +809,49 @@ function mapStructureDisplay(st){
   if(/commercial/i.test(s)) return 'Commercial';
   if(/muskoka/i.test(s)) return 'Muskoka';
   return s || 'Multi-Family';
+}
+function escAttr(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function parseDbPropertyId(pid){ if(!pid||String(pid).indexOf('db-')!==0) return null; const n=parseInt(String(pid).slice(3),10); return isNaN(n)?null:n; }
+function renderApiBuildingDetail(d, pid){
+  const tab = window._buildingTab || 'overview';
+  const name = d.name || 'Property';
+  const city = d.city || '';
+  const typeLabel = mapStructureDisplay(d.structure_type);
+  const units = Array.isArray(d.units) ? d.units : [];
+  const occ = units.filter(function(x){ return String(x.lease_status||'').toLowerCase().indexOf('active')>=0; }).length;
+  const uTot = units.length || Number(d.total_units) || 0;
+  const occPct = uTot ? Math.round(occ / uTot * 100) : 0;
+  const bh = d.building_health != null ? Number(d.building_health) : null;
+  const systems = Array.isArray(d.systems) ? d.systems : [];
+  const events = Array.isArray(d.recent_events) ? d.recent_events : [];
+  const wos = Array.isArray(d.active_work_orders) ? d.active_work_orders : [];
+  const alerts = Array.isArray(d.ai_alerts) ? d.ai_alerts : [];
+  const tabs = ['overview','units','systems','history','financials'];
+  const tabRow = tabs.map(function(t){
+    const on = tab===t;
+    return '<div onclick="window._buildingTab=\''+t+'\';showPropDetail(\''+escAttr(pid)+'\')" style="padding:8px 16px;font-size:12px;font-weight:600;cursor:pointer;border-bottom:2px solid '+(on?'var(--green)':'transparent')+';color:'+(on?'var(--green)':'var(--text3)')+';margin-bottom:-1px;text-transform:capitalize">'+t+'</div>';
+  }).join('');
+  const header = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><button class="btn btn-sm" onclick="navigate(\'prop-directory\')">← Properties</button><span style="font-size:13px;color:var(--text3)">›</span><h2 style="font-family:var(--font-display);font-size:18px;font-weight:800">'+escHtml(name)+'</h2><span style="font-size:12px;color:var(--text3)">'+escHtml(city)+'</span></div>';
+  const banner = '<div style="display:flex;align-items:center;gap:14px;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:14px"><div style="flex:1"><div style="font-size:14px;font-weight:700">'+escHtml(typeLabel)+' · '+escHtml(uTot)+' units · Occ '+occPct+'%</div><div style="font-size:11px;color:var(--text3)">'+(bh!=null&&!isNaN(bh)?'Building health '+bh+'/100 · ':'')+escHtml(d.address||'')+'</div></div></div>';
+  let body = '';
+  if(tab==='overview'){
+    const rows = [['Structure',typeLabel],['Region',d.portfolio_region||'—'],['PM',d.pm_assigned||'—'],['Year built',d.year_built||'—'],['Notes',d.notes||'—']];
+    body = '<div class="card" style="margin-bottom:14px"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Property</h3></div><div style="padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px">'+rows.map(function(r){ return '<div><div style="font-size:9px;color:var(--text3);text-transform:uppercase;font-weight:700">'+escHtml(r[0])+'</div><div style="font-size:12px">'+escHtml(r[1])+'</div></div>'; }).join('')+'</div></div>';
+    body += '<div class="card" style="margin-bottom:14px"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Active work orders</h3></div><div style="padding:10px 14px">'+(wos.length?wos.slice(0,8).map(function(w){ return '<div style="padding:8px 0;border-bottom:1px solid rgba(30,45,68,0.3);font-size:12px"><strong>'+escHtml(w.title||'')+'</strong> <span style="color:var(--text3)">'+escHtml(w.status||'')+'</span></div>'; }).join(''):'<div style="color:var(--text3);font-size:12px">No open work orders</div>')+'</div></div>';
+    body += '<div class="card"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>AI alerts</h3></div><div style="padding:10px 14px">'+(alerts.length?alerts.slice(0,6).map(function(a){ return '<div style="padding:8px 0;font-size:12px">'+escHtml(a.title||a.analysis||'Alert')+'</div>'; }).join(''):'<div style="color:var(--text3);font-size:12px">No active alerts</div>')+'</div></div>';
+  } else if(tab==='units'){
+    body = '<div class="card"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Units</h3></div><table class="tbl"><thead><tr><th>Unit</th><th>Tenant</th><th>Rent</th><th>Lease</th><th>Arrears</th><th>Open WOs</th></tr></thead><tbody>'+units.map(function(u){
+      return '<tr><td>'+escHtml(u.unit_number)+'</td><td>'+escHtml(u.tenant_name||'—')+'</td><td>'+(u.rent_amount!=null?'$'+Number(u.rent_amount).toLocaleString():'—')+'</td><td>'+escHtml(u.lease_status||'—')+'</td><td>'+(u.arrears!=null&&Number(u.arrears)>0?'$'+Number(u.arrears).toLocaleString():'—')+'</td><td>'+(u.open_wos!=null?String(u.open_wos):'0')+'</td></tr>';
+    }).join('')+'</tbody></table></div>';
+  } else if(tab==='systems'){
+    body = '<div class="card"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Building systems</h3></div><div style="padding:12px 16px">'+(systems.length?systems.map(function(s){ return '<div style="padding:10px 0;border-bottom:1px solid rgba(30,45,68,0.3)"><div style="font-weight:600">'+escHtml(s.system_type||'')+'</div><div style="font-size:11px;color:var(--text3)">'+(s.condition?escHtml(s.condition):'')+(s.next_service_date?' · Next: '+escHtml(String(s.next_service_date).slice(0,10)):'')+'</div></div>'; }).join(''):'<div style="color:var(--text3)">No systems recorded</div>')+'</div></div>';
+  } else if(tab==='history'){
+    body = '<div class="card"><div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Recent events</h3></div><div style="padding:12px 16px">'+(events.length?events.map(function(e){ return '<div style="padding:10px 0;border-bottom:1px solid rgba(30,45,68,0.3)"><div style="font-size:10px;color:var(--teal)">'+(e.event_date?escHtml(String(e.event_date).slice(0,10)):'')+'</div><div style="font-weight:600">'+escHtml(e.title||'')+'</div><div style="font-size:11px;color:var(--text3)">'+escHtml(e.detail||'')+'</div></div>'; }).join(''):'<div style="color:var(--text3)">No events</div>')+'</div></div>';
+  } else {
+    body = '<div class="card" style="padding:20px"><p style="color:var(--text3);font-size:13px">Financial rollups for synced properties use the Financials section and Buildium reporting.</p></div>';
+  }
+  return header + banner + '<div style="display:flex;border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto">'+tabRow+'</div>' + body;
 }
 function mapApiProperty(p){
   const uc = Number(p.unit_count) || 0, oc = Number(p.occupied_count) || 0;
@@ -1211,7 +1255,7 @@ const screens = {
         <div style="font-size:28px">${p.img}</div>
         <div style="flex:1">
           <div style="font-size:14px;font-weight:700;margin-bottom:2px">${p.name}</div>
-          <div style="font-size:11px;color:var(--text3)">${p.city} · ${p.year_built} · ${(p.sqft/1000).toFixed(0)}K sqft</div>
+          <div style="font-size:11px;color:var(--text3)">${p.city} · ${p.year_built || '—'} · ${((Number(p.sqft)||0)/1000).toFixed(0)}K sqft</div>
           <div style="display:flex;gap:5px;margin-top:4px;flex-wrap:wrap">
             <span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(${p.type==='Multi-Family'?'59,130,246':p.type==='Commercial'?'139,92,246':p.type==='Muskoka'?'6,182,212':'0,200,150'},0.12);color:${typeColor}">${p.type}</span>
             <span style="font-size:9px;padding:2px 7px;border-radius:4px;background:rgba(255,255,255,0.04);color:var(--text3)">
@@ -2443,8 +2487,6 @@ function selectWO(id){
 }
 
 function selectProp(id){ _selectedProp = id; }
-function showPropDetail(id){ /* Property detail slide-in */ }
-function showTenantDetail(id){ /* Tenant detail slide-in */ }
 
 function showInspDetail(id){
   const ins = getInspectionsForUI().find(i=>i.id===id);
@@ -2806,7 +2848,7 @@ screens['building-detail'] = function(propId) {
 
 <!-- Tabs -->
 <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
-  ${tabs.map(t=>`<div onclick="window._buildingTab='${t}';navigate('building-detail','${pid}')" style="padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;border-bottom:2px solid ${tab===t?'var(--green)':'transparent'};color:${tab===t?'var(--green)':'var(--text3)'};margin-bottom:-1px;text-transform:capitalize">${t}</div>`).join('')}
+  ${tabs.map(t=>`<div onclick="window._buildingTab='${t}';navigate('building-detail')" style="padding:8px 18px;font-size:12px;font-weight:600;cursor:pointer;border-bottom:2px solid ${tab===t?'var(--green)':'transparent'};color:${tab===t?'var(--green)':'var(--text3)'};margin-bottom:-1px;text-transform:capitalize">${t}</div>`).join('')}
 </div>
 
 ${tab==='overview'?renderBuildingOverview(b,p):
@@ -2843,7 +2885,7 @@ function renderBuildingOverview(b,p){
     <div class="card" style="margin-bottom:14px">
       <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Amenities & Features</h3></div>
       <div style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:6px">
-        ${b.amenities.map(a=>`<span class="badge b-gray">${a}</span>`).join('')}
+        ${(b.amenities||[]).map(a=>`<span class="badge b-gray">${a}</span>`).join('')}
       </div>
     </div>
 
@@ -2864,7 +2906,7 @@ function renderBuildingOverview(b,p){
   <div>
     <!-- Systems at a glance -->
     <div class="card" style="margin-bottom:14px">
-      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Systems Summary</h3><button class="btn btn-xs" style="margin-left:auto" onclick="window._buildingTab='systems';navigate('building-detail','${b.id}')">View All</button></div>
+      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Systems Summary</h3><button class="btn btn-xs" style="margin-left:auto" onclick="window._buildingTab='systems';navigate('building-detail')">View All</button></div>
       ${Object.entries(b.systems).slice(0,5).map(([key,sys])=>`
       <div style="padding:9px 14px;border-bottom:1px solid rgba(30,45,68,0.4)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
@@ -2878,7 +2920,7 @@ function renderBuildingOverview(b,p){
 
     <!-- Recent history -->
     <div class="card">
-      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Recent Events</h3><button class="btn btn-xs" style="margin-left:auto" onclick="window._buildingTab='history';navigate('building-detail','${b.id}')">Full History</button></div>
+      <div class="card-hd" style="border-bottom:1px solid var(--border)"><h3>Recent Events</h3><button class="btn btn-xs" style="margin-left:auto" onclick="window._buildingTab='history';navigate('building-detail')">Full History</button></div>
       ${b.history.slice(-5).reverse().map(ev=>`
       <div style="padding:9px 14px;border-bottom:1px solid rgba(30,45,68,0.4)">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:2px">
@@ -2922,7 +2964,7 @@ function renderBuildingUnits(b,p){
   return `
 <div style="margin-bottom:14px;display:flex;align-items:center;gap:10px">
   <div style="display:flex;gap:6px">
-    ${['All','Occupied','Vacant','Attention'].map(f=>`<button onclick="window._unitFilter='${f}';navigate('building-detail','${b.id}')" class="btn btn-xs ${(window._unitFilter||'All')===f?'btn-green':''}">${f}</button>`).join('')}
+    ${['All','Occupied','Vacant','Attention'].map(f=>`<button onclick="window._unitFilter='${f}';navigate('building-detail')" class="btn btn-xs ${(window._unitFilter||'All')===f?'btn-green':''}">${f}</button>`).join('')}
   </div>
   <div style="margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--text3)">
     <span>🟢 Occupied</span><span>🟡 Attention</span><span>🔴 Vacant</span><span>⬛ Common</span>
@@ -3645,14 +3687,6 @@ function showTenantDetail(id){
   showTenantProfile(id);
 }
 
-// Wire up building detail to properties
-function showPropDetail(id){
-  window._selectedProp = id;
-  window._buildingTab = 'overview';
-  window._unitTab = 'Tenant';
-  navigate('building-detail');
-}
-screens['building-detail'] = function(){ return screens['building-detail-fn'](window._selectedProp||'P003'); };
 (function(){
   const orig = screens['building-detail'];
   const fn = function(propId){ return (BUILDINGS_DETAIL[propId||window._selectedProp]?renderBuildingFull:function(){return `<div style="padding:40px;text-align:center;color:var(--text3)">Select a property to view building detail.<br><br><button class="btn" onclick="navigate('prop-directory')">← Properties</button></div>`;})(propId||window._selectedProp); };
@@ -4717,15 +4751,22 @@ const newNavHTML = `
 
 
 
-// ═══════════════════════════════════════════════════════════════════
-// PATCH 1: Fix building detail tab navigation
-// Replace showPropDetail + add switchBuildingTab helper
-// ═══════════════════════════════════════════════════════════════════
-function showPropDetail(id, tab){
+async function showPropDetail(id, tab){
   window._selectedProp = id;
   if(tab) window._buildingTab = tab;
   else if(!window._buildingTab) window._buildingTab = 'overview';
   window._selectedUnit = null;
+  const nid = parseDbPropertyId(id);
+  if(nid != null){
+    try{
+      window._apiPropertyDetail = await api('/api/properties/'+nid);
+    }catch(e){
+      window._apiPropertyDetail = null;
+      toast('Could not load property detail');
+    }
+  } else {
+    window._apiPropertyDetail = null;
+  }
   switchSection('properties');
   navigate('building-detail');
 }
@@ -9402,7 +9443,15 @@ function renderBuildingFloorplans(b, p){
     const pid = propIdArg || window._selectedProp || 'P003';
     if(!pid) return origFn(propIdArg);
 
-    // Check if BUILDINGS_DETAIL has this property
+    const dbNum = parseDbPropertyId(pid);
+    if(dbNum != null && window._apiPropertyDetail && Number(window._apiPropertyDetail.id) === dbNum){
+      return renderApiBuildingDetail(window._apiPropertyDetail, pid);
+    }
+    if(dbNum != null && (!window._apiPropertyDetail || Number(window._apiPropertyDetail.id) !== dbNum)){
+      const gp = getProp(pid);
+      return '<div style="padding:40px;text-align:center;color:var(--text3)">'+escHtml(gp.name || pid)+'<br><br>Building detail could not be loaded from the API.<br><br><button class="btn" onclick="navigate(\'prop-directory\')">← Properties</button></div>';
+    }
+
     if(typeof BUILDINGS_DETAIL === 'undefined' || !BUILDINGS_DETAIL[pid]){
       return origFn ? origFn(propIdArg) : '<div style="padding:40px;text-align:center;color:var(--text3)">Select a property to view detail.</div>';
     }
